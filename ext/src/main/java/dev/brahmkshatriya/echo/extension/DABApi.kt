@@ -7,6 +7,7 @@ import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromStream
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -15,8 +16,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
-import java.io.FilterInputStream
 import java.io.InputStream
 
 class DABApi(
@@ -25,16 +24,18 @@ class DABApi(
 ) {
 
     companion object {
-        private val json = Json {
-            isLenient = true
-            ignoreUnknownKeys = true
-            useArrayPolymorphism = true
-        }
+        private val json = Json { /* ... */ }
         private const val BASE_URL = "https://dab.yeet.su/api"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 
     class DABApiException(val code: Int, message: String) : Exception("API Error $code: $message")
+
+    // Add this public method to get the cookie header string.
+    fun getCookies(url: String): String {
+        return client.cookieJar.loadForRequest(url.toHttpUrl())
+            .joinToString("; ") { "${it.name}=${it.value}" }
+    }
 
     internal suspend fun callApi(
         path: String,

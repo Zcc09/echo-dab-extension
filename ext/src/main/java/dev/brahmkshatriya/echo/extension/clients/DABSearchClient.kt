@@ -16,55 +16,53 @@ class DABSearchClient(
     private val api: DABApi,
 ) : SearchFeedClient {
 
-    override val source: String = "DAB"
-
-    override suspend fun getSearchFeed(query: String): Feed = supervisorScope {
-        // Fetch tracks, albums, and artists in parallel
-        val tracksDeferred = async {
-            api.callApi(path = "/search", queryParams = mapOf("q" to query, "type" to "track"))
-        }
-        val albumsDeferred = async {
-            api.callApi(path = "/search", queryParams = mapOf("q" to query, "type" to "album"))
-        }
-        val artistsDeferred = async {
-            api.callApi(path = "/search", queryParams = mapOf("q" to query, "type" to "artist"))
-        }
-
-        val shelves = mutableListOf<Shelf>()
-
-        // Process tracks
-        try {
-            val tracksJson = tracksDeferred.await()["results"] as? JsonArray
-            if (!tracksJson.isNullOrEmpty()) {
-                val tracks = tracksJson.mapNotNull { it.jsonObject.toTrack() }
-                shelves.add(Shelf.Lists("Tracks", tracks))
+    // Rename `getSearchFeed` to `loadSearchFeed`.
+    override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
+        return supervisorScope {
+            val tracksDeferred = async {
+                api.callApi(path = "/search", queryParams = mapOf("q" to query, "type" to "track"))
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        // Process albums
-        try {
-            val albumsJson = albumsDeferred.await()["results"] as? JsonArray
-            if (!albumsJson.isNullOrEmpty()) {
-                val albums = albumsJson.mapNotNull { it.jsonObject.toAlbum() }
-                shelves.add(Shelf.Grid("Albums", albums))
+            val albumsDeferred = async {
+                api.callApi(path = "/search", queryParams = mapOf("q" to query, "type" to "album"))
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        // Process artists
-        try {
-            val artistsJson = artistsDeferred.await()["results"] as? JsonArray
-            if (!artistsJson.isNullOrEmpty()) {
-                val artists = artistsJson.mapNotNull { it.jsonObject.toArtist() }
-                shelves.add(Shelf.Grid("Artists", artists))
+            val artistsDeferred = async {
+                api.callApi(path = "/search", queryParams = mapOf("q" to query, "type" to "artist"))
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
 
-        return@supervisorScope Feed(shelves)
+            val shelves = mutableListOf<Shelf>()
+
+            try {
+                val tracksJson = tracksDeferred.await()["results"] as? JsonArray
+                if (!tracksJson.isNullOrEmpty()) {
+                    val tracks = tracksJson.mapNotNull { it.jsonObject.toTrack() }
+                    shelves.add(Shelf.Lists("Tracks", tracks))
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            try {
+                val albumsJson = albumsDeferred.await()["results"] as? JsonArray
+                if (!albumsJson.isNullOrEmpty()) {
+                    val albums = albumsJson.mapNotNull { it.jsonObject.toAlbum() }
+                    shelves.add(Shelf.Grid("Albums", albums))
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            try {
+                val artistsJson = artistsDeferred.await()["results"] as? JsonArray
+                if (!artistsJson.isNullOrEmpty()) {
+                    val artists = artistsJson.mapNotNull { it.jsonObject.toArtist() }
+                    shelves.add(Shelf.Grid("Artists", artists))
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
+            // Return a Feed object with the shelves.
+            Feed(shelves, emptyList())
+        }
     }
 }

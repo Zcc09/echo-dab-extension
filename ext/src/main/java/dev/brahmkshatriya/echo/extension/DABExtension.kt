@@ -1,5 +1,6 @@
 package dev.brahmkshatriya.echo.extension
 
+import dev.brahmkshatriya.echo.common.clients.ExtensionClient
 import dev.brahmkshatriya.echo.common.Extension
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.extension.clients.DABAlbumClient
@@ -16,40 +17,35 @@ import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 
-class DABExtension : Extension() {
+class DABExtension : Extension<ExtensionClient>() {
 
     override val name = "DAB"
 
-    override val settings: List<Setting> = listOf(
-        Setting.TextInput(
-            key = "lastfm_api_key",
-            title = "Last.fm API Key",
-            subtitle = "Required for the Home feed",
-            private = true
-        )
-    )
+    private val okHttpClient by lazy {
+        val cookieJar = object : CookieJar {
+            private val cookieStore = mutableMapOf<String, List<Cookie>>()
+            override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+                cookieStore[url.host] = cookies
+            }
+            override fun loadForRequest(url: HttpUrl): List<Cookie> {
+                return cookieStore[url.host] ?: emptyList()
+            }
+        }
+        OkHttpClient.Builder()
+            .cookieJar(cookieJar)
+            .build()
+    }
+
+    private val session by lazy { DABSession(settings) }
+    private val api by lazy { DABApi(session, okHttpClient) }
+    private val lastFmApi by lazy {
+        val apiKey = settings.get("lastfm_api_key") ?: ""
+        LastFmApi(apiKey)
+    }
+
+    override val audioStreamProvider by lazy { AudioStreamProvider(api) }
 
     override val clients by lazy {
-        // Centralize all initializations here for clarity.
-        val okHttpClient by lazy {
-            val cookieJar = object : CookieJar {
-                private val cookieStore = mutableMapOf<String, List<Cookie>>()
-                override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-                    cookieStore[url.host] = cookies
-                }
-                override fun loadForRequest(url: HttpUrl): List<Cookie> {
-                    return cookieStore[url.host] ?: emptyList()
-                }
-            }
-            OkHttpClient.Builder()
-                .cookieJar(cookieJar)
-                .build()
-        }
-
-        val session = DABSession(settings)
-        val api = DABApi(session, okHttpClient)
-        val lastFmApi = LastFmApi(settings.get<String>("lastfm_api_key") ?: "")
-
         listOf(
             DABLoginClient(api, session),
             DABHomefeedClient(lastFmApi),
@@ -60,6 +56,18 @@ class DABExtension : Extension() {
             DABPlaylistClient(api),
             DABTrackClient(api),
             DABLyricsClient(api)
+        )
+    }
+
+    override suspend fun getSettings(): List<Setting> {
+        return listOf(
+            Setting.TextInput(
+                key = "lastfm_api_key",
+                title = "Last.fm API Key",
+                subtitle = "Required for the Home feed",
+                private = true,
+                value = settings.get("lastfm_api_key") ?: ""
+            )
         )
     }
 }

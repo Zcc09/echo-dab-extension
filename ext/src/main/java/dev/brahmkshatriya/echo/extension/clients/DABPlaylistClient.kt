@@ -1,7 +1,8 @@
 package dev.brahmkshatriya.echo.extension.clients
 
 import dev.brahmkshatriya.echo.common.clients.PlaylistClient
-import dev.brahmkshatriya.echo.common.helpers.Page
+import dev.brahmkshatriya.echo.common.helpers.PagedData
+import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.extension.DABApi
@@ -14,22 +15,33 @@ class DABPlaylistClient(
     private val api: DABApi,
 ) : PlaylistClient {
 
-    override val source: String = "DAB"
+    // This method is for fetching detailed playlist metadata.
+    override suspend fun loadPlaylist(playlist: Playlist): Playlist {
+        return playlist
+    }
 
-    override suspend fun getPlaylist(playlist: Playlist, page: Int): Page<Track>? {
-        val playlistId = playlist.id
-        val response = api.callApi(
-            path = "/libraries/$playlistId",
-            queryParams = mapOf("page" to page.toString())
-        )
+    // This method handles fetching the tracks within the playlist.
+    override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
+        // Create a PagedData object to handle pagination.
+        val pagedData = PagedData.SingleSource { page ->
+            val playlistId = playlist.id.removePrefix("playlist:")
+            val response = api.callApi(
+                path = "/libraries/$playlistId",
+                queryParams = mapOf("page" to (page + 1).toString()) // API is 1-indexed
+            )
 
-        val libraryJson = response["library"]?.jsonObject ?: return null
-        val tracksJson = libraryJson["tracks"] as? JsonArray ?: return null
-        val paginationJson = libraryJson["pagination"]?.jsonObject ?: return null
+            val libraryJson = response["library"]?.jsonObject ?: return@SingleSource Feed.Empty
+            val tracksJson = libraryJson["tracks"] as? JsonArray ?: return@SingleSource Feed.Empty
+            val paginationJson = libraryJson["pagination"]?.jsonObject
 
-        val tracks = tracksJson.mapNotNull { it.jsonObject.toTrack() }
-        val hasMore = paginationJson["hasMore"]?.jsonPrimitive?.content?.toBoolean() ?: false
+            val tracks = tracksJson.mapNotNull { it.jsonObject.toTrack() }
+            val hasMore = paginationJson?.get("hasMore")?.jsonPrimitive?.boolean ?: false
 
-        return Page(tracks, hasMore)
+            Feed(
+                data = tracks,
+                nextPage = if (hasMore) page + 1 else null
+            )
+        }
+        return Feed(pagedData)
     }
 }

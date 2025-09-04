@@ -14,24 +14,28 @@ class DABLoginClient(
     private val session: DABSession
 ) : LoginClient {
 
-    override val source: String = "DAB"
-    override val canLogout: Boolean = true
+    override val canLogout = true
 
-    override val loginFields: List<Setting> = listOf(
-        Setting.TextInput(
-            key = "email",
-            title = "Email",
-            private = false
-        ),
-        Setting.TextInput(
-            key = "password",
-            title = "Password",
-            private = true
-        )
-    )
+    override suspend fun login(inputs: Map<String, String>?): List<Setting>? {
+        // If inputs are null, the app is asking for the fields to display.
+        if (inputs == null) {
+            return listOf(
+                Setting.TextInput(
+                    key = "email",
+                    title = "Email",
+                    private = false,
+                    value = ""
+                ),
+                Setting.TextInput(
+                    key = "password",
+                    title = "Password",
+                    private = true,
+                    value = ""
+                )
+            )
+        }
 
-    // Added the required `suspend` keyword here.
-    override suspend fun login(inputs: Map<String, String>): User {
+        // If inputs are provided, process the login.
         val email = inputs["email"] ?: ""
         val password = inputs["password"] ?: ""
 
@@ -45,14 +49,14 @@ class DABLoginClient(
 
         val userJson = response["user"]?.jsonObject ?: throw Exception("Login failed: User data not found")
         val user = userJson.toUser()
-
         session.login(user)
-        return user
+
+        // Return null to signify that the login was successful.
+        return null
     }
 
     override suspend fun logout() {
         session.logout()
-        // This call is optional but recommended to clear the session on the server-side.
         try {
             api.callApi(path = "/auth/logout", method = "POST")
         } catch (e: Exception) {
@@ -60,7 +64,15 @@ class DABLoginClient(
         }
     }
 
-    override suspend fun getLoggedInUser(): User? {
+    override suspend fun getCurrentUser(): User? {
         return session.getLoggedInUser()
+    }
+
+    override fun setLoginUser(user: User?) {
+        if (user != null) {
+            session.login(user)
+        } else {
+            session.logout()
+        }
     }
 }

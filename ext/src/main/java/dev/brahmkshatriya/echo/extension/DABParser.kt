@@ -2,6 +2,7 @@ package dev.brahmkshatriya.echo.extension
 
 import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
+import dev.brahmkshatriya.echo.common.models.ImageHolder
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
@@ -18,96 +19,104 @@ object DABParser {
     fun JsonObject.toTrack(): Track? {
         val id = this["id"]?.jsonPrimitive?.content ?: return null
         val title = this["title"]?.jsonPrimitive?.content ?: return null
-        val cover = this["albumCover"]?.jsonPrimitive?.content
+        val coverUrl = this["albumCover"]?.jsonPrimitive?.content
         val duration = this["duration"]?.jsonPrimitive?.int?.toLong()
 
         val artistName = this["artist"]?.jsonPrimitive?.content
-        val artistId = this["artistId"]?.jsonPrimitive?.content
         val artists = if (artistName != null) {
-            listOf(Artist.Small(artistId ?: artistName, artistName, null, SOURCE))
+            listOf(Artist(artistName, "artist:$artistName", null))
         } else {
             emptyList()
         }
 
         val albumTitle = this["albumTitle"]?.jsonPrimitive?.content
         val albumId = this["albumId"]?.jsonPrimitive?.content
-        val album = if (albumTitle != null) {
-            Album.Small(albumId ?: albumTitle, albumTitle, cover, SOURCE)
+        val album = if (albumTitle != null && albumId != null) {
+            Album(albumTitle, "album:$albumId", null, null, null)
         } else {
             null
         }
 
         return Track(
-            source = SOURCE,
             id = id,
             title = title,
             artists = artists,
             album = album,
-            cover = cover,
-            duration = duration,
-            streamable = true
+            cover = coverUrl?.let { ImageHolder.Url(it) },
+            duration = duration
         )
     }
 
-    fun JsonObject.toAlbum(): Album.Small? {
+    fun JsonObject.toAlbum(): Album? {
         val id = this["id"]?.jsonPrimitive?.content ?: return null
         val title = this["title"]?.jsonPrimitive?.content ?: return null
-        val cover = this["cover"]?.jsonPrimitive?.content
-        return Album.Small(id, title, cover, SOURCE)
+        val coverUrl = this["cover"]?.jsonPrimitive?.content
+        val artistName = this["artist"]?.jsonPrimitive?.content
+        val artist = if(artistName != null) Artist(artistName, "artist:$artistName", null) else null
+        return Album(
+            title = title,
+            id = "album:$id",
+            cover = coverUrl?.let { ImageHolder.Url(it) },
+            artist = artist,
+            releaseDate = null
+        )
     }
 
-    fun JsonObject.toArtist(): Artist.Small? {
+    fun JsonObject.toArtist(): Artist? {
         val id = this["id"]?.jsonPrimitive?.content ?: return null
         val name = this["name"]?.jsonPrimitive?.content ?: return null
-        val thumbnail = this["image"]?.jsonPrimitive?.content
-        return Artist.Small(id, name, thumbnail, SOURCE)
+        val thumbnailUrl = this["image"]?.jsonPrimitive?.content
+        return Artist(
+            name = name,
+            id = "artist:$id",
+            thumbnail = thumbnailUrl?.let { ImageHolder.Url(it) }
+        )
     }
 
-    fun JsonObject.toPlaylist(): Playlist.Small? {
+    fun JsonObject.toPlaylist(): Playlist? {
         val id = this["id"]?.jsonPrimitive?.content ?: return null
         val name = this["name"]?.jsonPrimitive?.content ?: return null
         val trackCount = this["trackCount"]?.jsonPrimitive?.int
-        return Playlist.Small(id, name, null, SOURCE, trackCount)
+        return Playlist(
+            name = name,
+            id = "playlist:$id",
+            cover = null,
+            creator = null,
+            trackCount = trackCount
+        )
     }
 
     fun JsonObject.toUser(): User {
         val id = this["id"]?.jsonPrimitive?.int.toString()
         val username = this["username"]?.jsonPrimitive?.content ?: "Unknown"
-        return User(id, username, null, SOURCE)
+        return User(id, username, null)
     }
 
     fun JsonObject.toLastFmTrack(): Track? {
         val title = this["name"]?.jsonPrimitive?.content ?: return null
         val artistJson = this["artist"]?.jsonObject
         val artistName = artistJson?.get("name")?.jsonPrimitive?.content ?: "Unknown"
-        val artistMbid = artistJson?.get("mbid")?.jsonPrimitive?.content
-
-        val cover = (this["image"] as? JsonArray)
+        val coverUrl = (this["image"] as? JsonArray)
             ?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
 
         return Track(
-            source = SOURCE,
-            id = "lastfm:${artistMbid ?: artistName}:$title", // More robust ID
+            id = "lastfm_track:${artistName}_${title}",
             title = title,
-            artists = listOf(Artist.Small("lastfm:${artistMbid ?: artistName}", artistName, null, SOURCE)),
+            artists = listOf(Artist(artistName, "lastfm_artist:$artistName", null)),
             album = null,
-            cover = cover,
-            duration = this["duration"]?.jsonPrimitive?.int?.toLong(),
-            streamable = false
-        )
+            cover = coverUrl?.let { ImageHolder.Url(it) },
+            duration = this["duration"]?.jsonPrimitive?.int?.toLong()
+        ).apply { isStreamable = false }
     }
 
-    fun JsonObject.toLastFmArtist(): Artist.Small? {
+    fun JsonObject.toLastFmArtist(): Artist? {
         val name = this["name"]?.jsonPrimitive?.content ?: return null
-        val mbid = this["mbid"]?.jsonPrimitive?.content
-        val cover = (this["image"] as? JsonArray)
+        val coverUrl = (this["image"] as? JsonArray)
             ?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
-
-        return Artist.Small(
-            id = "lastfm:${mbid ?: name}", // More robust ID
+        return Artist(
             name = name,
-            thumbnail = cover,
-            source = SOURCE
+            id = "lastfm_artist:$name",
+            thumbnail = coverUrl?.let { ImageHolder.Url(it) }
         )
     }
 }
