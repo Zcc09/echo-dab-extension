@@ -1,6 +1,7 @@
 package dev.brahmkshatriya.echo.extension
 
 import dev.brahmkshatriya.echo.common.helpers.ContinuationCallback.Companion.await
+import java.io.InputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -16,7 +17,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.io.InputStream
+import okhttp3.Response
 
 class DABApi(
     val session: DABSession,
@@ -24,14 +25,16 @@ class DABApi(
 ) {
 
     companion object {
-        private val json = Json { /* ... */ }
+        private val json = Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+        }
         private const val BASE_URL = "https://dab.yeet.su/api"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 
     class DABApiException(val code: Int, message: String) : Exception("API Error $code: $message")
 
-    // Add this public method to get the cookie header string.
     fun getCookies(url: String): String {
         return client.cookieJar.loadForRequest(url.toHttpUrl())
             .joinToString("; ") { "${it.name}=${it.value}" }
@@ -52,7 +55,7 @@ class DABApi(
         }
 
         val requestBody: RequestBody? = bodyBuilder?.let {
-            json.encodeToString(JsonObject(it)).toRequestBody(JSON_MEDIA_TYPE)
+            json.encodeToString(JsonObject.serializer(), buildJsonObject(it)).toRequestBody(JSON_MEDIA_TYPE)
         }
 
         val requestBuilder = Request.Builder()
@@ -69,12 +72,12 @@ class DABApi(
         }
 
         client.newCall(requestBuilder.build()).await().use { response ->
-            if (response.body.contentLength() == 0L) {
+            if (response.body?.contentLength() == 0L) {
                 if (response.isSuccessful) return@withContext JsonObject(emptyMap())
                 else throw DABApiException(response.code, "API call failed with empty body")
             }
 
-            val result = response.body.source().use { decodeJsonStream(it.inputStream()) }
+            val result = response.body!!.source().use { decodeJsonStream(it.inputStream()) }
 
             if (!response.isSuccessful) {
                 val errorMessage = result["message"]?.jsonPrimitive?.content ?: "Unknown API error"
@@ -102,15 +105,7 @@ class DABApi(
             throw Exception("Failed to fetch audio stream: ${response.code}")
         }
 
-        return ResponseInputStream(response)
-    }
-
-    private class ResponseInputStream(private val response: Response) :
-        FilterInputStream(response.body!!.byteStream()) {
-        override fun close() {
-            response.close()
-            super.close()
-        }
+        return response.body!!.byteStream()
     }
 
     @OptIn(ExperimentalSerializationApi::class)

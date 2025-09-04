@@ -16,26 +16,9 @@ class DABLoginClient(
 
     override val canLogout = true
 
-    override suspend fun login(inputs: Map<String, String>?): List<Setting>? {
-        // If inputs are null, the app is asking for the fields to display.
-        if (inputs == null) {
-            return listOf(
-                Setting.TextInput(
-                    key = "email",
-                    title = "Email",
-                    private = false,
-                    value = ""
-                ),
-                Setting.TextInput(
-                    key = "password",
-                    title = "Password",
-                    private = true,
-                    value = ""
-                )
-            )
-        }
+    override suspend fun login(inputs: Map<String, String>?): List<User>? {
+        if (inputs == null) return null
 
-        // If inputs are provided, process the login.
         val email = inputs["email"] ?: ""
         val password = inputs["password"] ?: ""
 
@@ -49,10 +32,7 @@ class DABLoginClient(
 
         val userJson = response["user"]?.jsonObject ?: throw Exception("Login failed: User data not found")
         val user = userJson.toUser()
-        session.login(user)
-
-        // Return null to signify that the login was successful.
-        return null
+        return listOf(user)
     }
 
     override suspend fun logout() {
@@ -60,7 +40,7 @@ class DABLoginClient(
         try {
             api.callApi(path = "/auth/logout", method = "POST")
         } catch (e: Exception) {
-            // Ignore errors here as the local session is already cleared.
+            // Ignore
         }
     }
 
@@ -74,5 +54,22 @@ class DABLoginClient(
         } else {
             session.logout()
         }
+    }
+
+    override suspend fun getLoginSettings(): List<Setting> {
+        return listOf(
+            Setting.TextInput(
+                key = "email",
+                title = "Email",
+                private = false,
+                value = ""
+            ),
+            Setting.TextInput(
+                key = "password",
+                title = "Password",
+                private = true,
+                value = ""
+            )
+        )
     }
 }

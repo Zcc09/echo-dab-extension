@@ -16,7 +16,6 @@ class DABSearchClient(
     private val api: DABApi,
 ) : SearchFeedClient {
 
-    // Rename `getSearchFeed` to `loadSearchFeed`.
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
         return supervisorScope {
             val tracksDeferred = async {
@@ -61,7 +60,6 @@ class DABSearchClient(
                 e.printStackTrace()
             }
 
-            // Return a Feed object with the shelves.
             Feed(shelves, emptyList())
         }
     }

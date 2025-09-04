@@ -14,7 +14,6 @@ class DABHomefeedClient(
     private val lastFmApi: LastFmApi
 ) : HomeFeedClient {
 
-    // Rename `getFeed` to `loadHomeFeed` and update the return type.
     override suspend fun loadHomeFeed(): Feed<Shelf> {
         val response = lastFmApi.getHomeFeed()
         val sections = response["sections"] as? JsonArray ?: return Feed.Empty
@@ -28,18 +27,15 @@ class DABHomefeedClient(
             when (type) {
                 "lastfm:track" -> {
                     val tracks = itemsJson.mapNotNull { it.jsonObject.toLastFmTrack() }
-                    // The old Shelf.Lists constructor takes the title and items.
                     Shelf.Lists(title, tracks)
                 }
                 "lastfm:artist" -> {
                     val artists = itemsJson.mapNotNull { it.jsonObject.toLastFmArtist() }
-                    // The old Shelf.Grid constructor takes the title and items.
                     Shelf.Grid(title, artists)
                 }
                 else -> null
             }
         }
-        // The old Feed constructor takes a list of shelves and tabs.
-        return Feed(shelves, emptyList())
+        return Feed(shelves)
     }
 }

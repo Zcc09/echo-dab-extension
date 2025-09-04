@@ -15,13 +15,10 @@ class DABArtistClient(
     private val api: DABApi,
 ) : ArtistClient {
 
-    // This method is for fetching detailed artist metadata.
-    // We can return the provided artist object for simplicity.
     override suspend fun loadArtist(artist: Artist): Artist {
         return artist
     }
 
-    // This method loads the content for the artist's page.
     override suspend fun loadFeed(artist: Artist): Feed<Shelf> {
         val artistId = artist.id.removePrefix("artist:")
         val response = api.callApi(
@@ -32,11 +29,9 @@ class DABArtistClient(
         val artistName = response["artist"]?.jsonObject?.get("name")?.jsonPrimitive?.content ?: artist.name
         val albumsJson = response["albums"] as? JsonArray ?: JsonArray(emptyList())
 
-        // Create a shelf for the artist's albums.
         val albums = albumsJson.mapNotNull { it.jsonObject.toAlbum() }
         val albumShelf = Shelf.Grid("$artistName's Albums", albums)
 
-        // Create a shelf for the artist's "top tracks" from their albums.
         val topTracks = albumsJson
             .take(10)
             .flatMap { album ->
@@ -46,6 +41,6 @@ class DABArtistClient(
             .mapNotNull { it.jsonObject.toTrack() }
         val topTracksShelf = Shelf.Lists("Top Tracks", topTracks)
 
-        return Feed(listOf(topTracksShelf, albumShelf), emptyList())
+        return Feed(listOf(topTracksShelf, albumShelf))
     }
 }

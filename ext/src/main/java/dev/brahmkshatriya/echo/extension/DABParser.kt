@@ -1,11 +1,7 @@
 package dev.brahmkshatriya.echo.extension
 
-import dev.brahmkshatriya.echo.common.models.Album
-import dev.brahmkshatriya.echo.common.models.Artist
-import dev.brahmkshatriya.echo.common.models.ImageHolder
-import dev.brahmkshatriya.echo.common.models.Playlist
-import dev.brahmkshatriya.echo.common.models.Track
-import dev.brahmkshatriya.echo.common.models.User
+import dev.brahmkshatriya.echo.common.models.*
+import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
@@ -13,8 +9,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 object DABParser {
-
-    private const val SOURCE = "DAB"
 
     fun JsonObject.toTrack(): Track? {
         val id = this["id"]?.jsonPrimitive?.content ?: return null
@@ -24,7 +18,7 @@ object DABParser {
 
         val artistName = this["artist"]?.jsonPrimitive?.content
         val artists = if (artistName != null) {
-            listOf(Artist(artistName, "artist:$artistName", null))
+            listOf(Artist(artistName, "artist:$artistName"))
         } else {
             emptyList()
         }
@@ -32,7 +26,7 @@ object DABParser {
         val albumTitle = this["albumTitle"]?.jsonPrimitive?.content
         val albumId = this["albumId"]?.jsonPrimitive?.content
         val album = if (albumTitle != null && albumId != null) {
-            Album(albumTitle, "album:$albumId", null, null, null)
+            Album("album:$albumId", albumTitle, coverUrl?.toImageHolder(), artists, null)
         } else {
             null
         }
@@ -42,8 +36,10 @@ object DABParser {
             title = title,
             artists = artists,
             album = album,
-            cover = coverUrl?.let { ImageHolder.Url(it) },
-            duration = duration
+            cover = coverUrl?.toImageHolder(),
+            duration = duration,
+            isPlayable = Track.Playable.Yes,
+            streamables = listOf(Streamable.server(id, 0))
         )
     }
 
@@ -52,12 +48,12 @@ object DABParser {
         val title = this["title"]?.jsonPrimitive?.content ?: return null
         val coverUrl = this["cover"]?.jsonPrimitive?.content
         val artistName = this["artist"]?.jsonPrimitive?.content
-        val artist = if(artistName != null) Artist(artistName, "artist:$artistName", null) else null
+        val artist = if(artistName != null) Artist(artistName, "artist:$artistName") else null
         return Album(
-            title = title,
             id = "album:$id",
-            cover = coverUrl?.let { ImageHolder.Url(it) },
-            artist = artist,
+            title = title,
+            cover = coverUrl?.toImageHolder(),
+            artists = if(artist != null) listOf(artist) else emptyList(),
             releaseDate = null
         )
     }
@@ -67,9 +63,9 @@ object DABParser {
         val name = this["name"]?.jsonPrimitive?.content ?: return null
         val thumbnailUrl = this["image"]?.jsonPrimitive?.content
         return Artist(
-            name = name,
             id = "artist:$id",
-            thumbnail = thumbnailUrl?.let { ImageHolder.Url(it) }
+            name = name,
+            cover = thumbnailUrl?.toImageHolder()
         )
     }
 
@@ -78,11 +74,11 @@ object DABParser {
         val name = this["name"]?.jsonPrimitive?.content ?: return null
         val trackCount = this["trackCount"]?.jsonPrimitive?.int
         return Playlist(
-            name = name,
             id = "playlist:$id",
+            title = name,
             cover = null,
-            creator = null,
-            trackCount = trackCount
+            trackCount = trackCount?.toLong(),
+            isEditable = false
         )
     }
 
@@ -102,11 +98,13 @@ object DABParser {
         return Track(
             id = "lastfm_track:${artistName}_${title}",
             title = title,
-            artists = listOf(Artist(artistName, "lastfm_artist:$artistName", null)),
+            artists = listOf(Artist(artistName, "lastfm_artist:$artistName")),
             album = null,
-            cover = coverUrl?.let { ImageHolder.Url(it) },
-            duration = this["duration"]?.jsonPrimitive?.int?.toLong()
-        ).apply { isStreamable = false }
+            cover = coverUrl?.toImageHolder(),
+            duration = this["duration"]?.jsonPrimitive?.int?.toLong(),
+            isPlayable = Track.Playable.No,
+            streamables = emptyList()
+        )
     }
 
     fun JsonObject.toLastFmArtist(): Artist? {
@@ -114,9 +112,9 @@ object DABParser {
         val coverUrl = (this["image"] as? JsonArray)
             ?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
         return Artist(
-            name = name,
             id = "lastfm_artist:$name",
-            thumbnail = coverUrl?.let { ImageHolder.Url(it) }
+            name = name,
+            cover = coverUrl?.toImageHolder()
         )
     }
 }

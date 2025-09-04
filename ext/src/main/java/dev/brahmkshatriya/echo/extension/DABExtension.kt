@@ -1,25 +1,29 @@
 package dev.brahmkshatriya.echo.extension
 
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
-import dev.brahmkshatriya.echo.common.Extension
 import dev.brahmkshatriya.echo.common.settings.Setting
-import dev.brahmkshatriya.echo.extension.clients.DABAlbumClient
-import dev.brahmkshatriya.echo.extension.clients.DABArtistClient
-import dev.brahmkshatriya.echo.extension.clients.DABHomefeedClient
-import dev.brahmkshatriya.echo.extension.clients.DABLibraryClient
-import dev.brahmkshatriya.echo.extension.clients.DABLoginClient
-import dev.brahmkshatriya.echo.extension.clients.DABLyricsClient
-import dev.brahmkshatriya.echo.extension.clients.DABPlaylistClient
-import dev.brahmkshatriya.echo.extension.clients.DABSearchClient
-import dev.brahmkshatriya.echo.extension.clients.DABTrackClient
+import dev.brahmkshatriya.echo.common.settings.Settings
+import dev.brahmkshatriya.echo.extension.clients.*
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 
-class DABExtension : Extension<ExtensionClient>() {
+open class DABExtension
 
-    override val name = "DAB"
+    val clients: List<ExtensionClient> by lazy {
+        listOf(
+            DABLoginClient(api, session),
+            DABHomefeedClient(lastFmApi),
+            DABSearchClient(api),
+            DABLibraryClient(api),
+            DABAlbumClient(api),
+            DABArtistClient(api),
+            DABPlaylistClient(api),
+            DABTrackClient(api),
+            DABLyricsClient(api)
+        )
+    }
 
     private val okHttpClient by lazy {
         val cookieJar = object : CookieJar {
@@ -36,6 +40,7 @@ class DABExtension : Extension<ExtensionClient>() {
             .build()
     }
 
+    // 'settings' is now a property of DABExtension, initialized by the constructor
     private val session by lazy { DABSession(settings) }
     private val api by lazy { DABApi(session, okHttpClient) }
     private val lastFmApi by lazy {
@@ -43,22 +48,7 @@ class DABExtension : Extension<ExtensionClient>() {
         LastFmApi(apiKey)
     }
 
-    override val audioStreamProvider by lazy { AudioStreamProvider(api) }
-
-    override val clients by lazy {
-        listOf(
-            DABLoginClient(api, session),
-            DABHomefeedClient(lastFmApi),
-            DABSearchClient(api),
-            DABLibraryClient(api),
-            DABAlbumClient(api),
-            DABArtistClient(api),
-            DABPlaylistClient(api),
-            DABTrackClient(api),
-            DABLyricsClient(api)
-        )
-    }
-
+    // The 'override' keyword is now valid because DABExtension implements GlobalSettingsProvider
     override suspend fun getSettings(): List<Setting> {
         return listOf(
             Setting.TextInput(

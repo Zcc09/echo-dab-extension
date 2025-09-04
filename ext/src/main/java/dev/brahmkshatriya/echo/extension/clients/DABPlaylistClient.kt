@@ -4,26 +4,25 @@ import dev.brahmkshatriya.echo.common.clients.PlaylistClient
 import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Playlist
+import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.extension.DABApi
 import dev.brahmkshatriya.echo.extension.DABParser.toTrack
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.boolean
 
 class DABPlaylistClient(
     private val api: DABApi,
 ) : PlaylistClient {
 
-    // This method is for fetching detailed playlist metadata.
     override suspend fun loadPlaylist(playlist: Playlist): Playlist {
         return playlist
     }
 
-    // This method handles fetching the tracks within the playlist.
     override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
-        // Create a PagedData object to handle pagination.
-        val pagedData = PagedData.SingleSource { page ->
+        return PagedData.SingleSource { page ->
             val playlistId = playlist.id.removePrefix("playlist:")
             val response = api.callApi(
                 path = "/libraries/$playlistId",
@@ -41,7 +40,10 @@ class DABPlaylistClient(
                 data = tracks,
                 nextPage = if (hasMore) page + 1 else null
             )
-        }
-        return Feed(pagedData)
+        }.toFeed()
+    }
+
+    override suspend fun loadFeed(playlist: Playlist): Feed<Shelf>? {
+        return null
     }
 }

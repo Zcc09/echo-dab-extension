@@ -15,7 +15,6 @@ class DABLibraryClient(
     private val api: DABApi,
 ) : LibraryFeedClient {
 
-    // Rename `getFeed` to `loadLibraryFeed`
     override suspend fun loadLibraryFeed(): Feed<Shelf> {
         return supervisorScope {
             val playlistsDeferred = async { api.callApi(path = "/libraries") }
@@ -43,8 +42,7 @@ class DABLibraryClient(
                 e.printStackTrace()
             }
 
-            // Return a Feed object with the shelves.
-            Feed(shelves, emptyList())
+            Feed(shelves)
         }
     }
 }
