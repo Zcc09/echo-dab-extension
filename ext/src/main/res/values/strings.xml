@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="extension_id">dab_ext</string>
-    <string name="extension_name">DAB Music Player Extension</string>
-    <string name="extension_version">ve9fbfb0</string>
-    <string name="extension_author">Mojangle</string>
-    <string name="extension_description">An Echo that lets you search, stream, or download any song in up to 24bit/192kHz using DAB Music Player.</string>
-</resources>
-
