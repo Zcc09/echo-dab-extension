@@ -2,180 +2,107 @@ package dev.brahmkshatriya.echo.extension
 
 import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
-import dev.brahmkshatriya.echo.common.models.EchoMediaItem
-import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
 import dev.brahmkshatriya.echo.common.models.Playlist
-import dev.brahmkshatriya.echo.common.models.Shelf
-import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
-import dev.brahmkshatriya.echo.common.models.Date as EchoDate
-import kotlinx.serialization.json.JsonArray
+import dev.brahmkshatriya.echo.common.models.User
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 
-class DABParser(private val session: DABSession) {
+object DABParser {
 
-    fun JsonArray.toShelfItemsList(name: String, typeHint: String): Shelf.Lists.Items? {
-        val items = this.mapNotNull { it.jsonObject.toEchoMediaItem(typeHint) }
-        return if (items.isNotEmpty()) {
-            Shelf.Lists.Items(
-                id = name,
-                title = name,
-                list = items
-            )
+    private const val SOURCE = "DAB"
+
+    fun JsonObject.toTrack(): Track? {
+        val id = this["id"]?.jsonPrimitive?.content ?: return null
+        val title = this["title"]?.jsonPrimitive?.content ?: return null
+        val cover = this["albumCover"]?.jsonPrimitive?.content
+        val duration = this["duration"]?.jsonPrimitive?.int?.toLong()
+
+        val artistName = this["artist"]?.jsonPrimitive?.content
+        val artistId = this["artistId"]?.jsonPrimitive?.content
+        val artists = if (artistName != null) {
+            listOf(Artist.Small(artistId ?: artistName, artistName, null, SOURCE))
+        } else {
+            emptyList()
+        }
+
+        val albumTitle = this["albumTitle"]?.jsonPrimitive?.content
+        val albumId = this["albumId"]?.jsonPrimitive?.content
+        val album = if (albumTitle != null) {
+            Album.Small(albumId ?: albumTitle, albumTitle, cover, SOURCE)
         } else {
             null
         }
-    }
-
-    private fun JsonObject.toEchoMediaItem(typeHint: String): EchoMediaItem? {
-        // UPDATED: Now routes to new Last.fm parsers based on the typeHint
-        return when (typeHint.lowercase()) {
-            "track", "song" -> toTrack()
-            "album" -> toAlbum()
-            "artist" -> toArtist()
-            "playlist" -> toPlaylist()
-            "lastfm:track" -> toLastFmTrack()   // <- NEW
-            "lastfm:artist" -> toLastFmArtist() // <- NEW
-            else -> null
-        }
-    }
-
-    // =================================================================
-    // NEW: Functions for parsing Last.fm API data
-    // =================================================================
-
-    private fun JsonObject.toLastFmTrack(): Track? {
-        val title = this["name"]?.jsonPrimitive?.content ?: return null
-        val artistName = this["artist"]?.jsonObject?.get("name")?.jsonPrimitive?.content ?: "Unknown Artist"
-        val artworkUrl = this["image"]?.jsonArray?.let { findBestImage(it) }
-
-        // Last.fm charts don't provide stable IDs, so we create a temporary one.
-        // This is fine for display, but it can't be used to fetch details later.
-        val tempId = "lastfm:track:${artistName}:${title}"
 
         return Track(
-            id = tempId,
+            source = SOURCE,
+            id = id,
             title = title,
-            cover = artworkUrl?.toImageHolder(),
-            artists = listOf(Artist(id = "lastfm:artist:$artistName", name = artistName)),
-            // Fields not provided by Last.fm charts are left as null/empty.
-            duration = null,
-            releaseDate = null,
-            album = null,
-            streamables = emptyList(),
-            isExplicit = false
+            artists = artists,
+            album = album,
+            cover = cover,
+            duration = duration,
+            streamable = true
         )
     }
+    fun JsonObject.toLastFmTrack(): Track? {
+        val title = this["name"]?.jsonPrimitive?.content ?: return null
+        val artistName = this["artist"]?.jsonObject?.get("name")?.jsonPrimitive?.content ?: "Unknown"
 
-    private fun JsonObject.toLastFmArtist(): Artist? {
-        val name = this["name"]?.jsonPrimitive?.content ?: return null
-        val artworkUrl = this["image"]?.jsonArray?.let { findBestImage(it) }
-        val tempId = "lastfm:artist:${name}"
-
-        return Artist(
-            id = tempId,
-            name = name,
-            cover = artworkUrl?.toImageHolder(),
-            bio = null
-        )
-    }
-
-    private fun findBestImage(imageArray: JsonArray): String? {
-        val imageUrls = imageArray.mapNotNull { it.jsonObject }.associate {
-            it["size"]?.jsonPrimitive?.content to it["#text"]?.jsonPrimitive?.content
-        }
-        return imageUrls["extralarge"]
-            ?: imageUrls["large"]
-            ?: imageUrls["medium"]
-            ?: imageUrls["small"]
-            ?: imageUrls.values.firstOrNull { !it.isNullOrBlank() }
-    }
-
-    // =================================================================
-    // ORIGINAL: Functions for parsing your primary API data remain untouched
-    // =================================================================
-
-    fun JsonObject.toTrack(): Track {
-        // ... your original toTrack() code remains here, unchanged ...
-        val albumJson = this["album"]?.jsonObject
-        val artistsJson = this["artists"]?.jsonArray
+        // Last.fm provides multiple image sizes in an array. We'll try to find the largest one.
+        val cover = (this["image"] as? JsonArray)
+            ?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
 
         return Track(
-            id = this["id"]?.jsonPrimitive?.content.orEmpty(),
-            title = this["title"]?.jsonPrimitive?.content.orEmpty(),
-            cover = this["coverArt"]?.jsonPrimitive?.content?.toImageHolder(),
-            duration = this["duration_ms"]?.jsonPrimitive?.longOrNull,
-            releaseDate = this["releaseDate"]?.jsonPrimitive?.content?.toDate(),
-            artists = artistsJson?.map { it.jsonObject.toArtist() } ?: emptyList(),
-            album = albumJson?.let {
-                Album(
-                    id = it["id"]?.jsonPrimitive?.content.orEmpty(),
-                    title = it["title"]?.jsonPrimitive?.content.orEmpty(),
-                    cover = it["coverArt"]?.jsonPrimitive?.content?.toImageHolder()
-                )
-            },
-            streamables = this["streamUrl"]?.jsonPrimitive?.content?.let {
-                listOf(Streamable.server(id = it, title = "Default", quality = 1))
-            } ?: emptyList(),
-            isExplicit = this["explicit"]?.jsonPrimitive?.content == "true"
+            source = SOURCE,
+            id = "lastfm_track_${artistName}_${title}", // Create a unique-enough ID
+            title = title,
+            artists = listOf(Artist.Small("lastfm_artist_$artistName", artistName, null, SOURCE)),
+            album = null,
+            cover = cover,
+            duration = this["duration"]?.jsonPrimitive?.int?.toLong(),
+            streamable = false // Tracks from Last.fm are for metadata only
         )
     }
 
-    fun JsonObject.toAlbum(): Album {
-        // ... your original toAlbum() code remains here, unchanged ...
-        return Album(
-            id = this["id"]?.jsonPrimitive?.content.orEmpty(),
-            title = this["title"]?.jsonPrimitive?.content.orEmpty(),
-            cover = this["coverArt"]?.jsonPrimitive?.content?.toImageHolder(),
-            trackCount = this["trackCount"]?.jsonPrimitive?.longOrNull,
-            artists = this["artists"]?.jsonArray?.map { it.jsonObject.toArtist() } ?: emptyList(),
-            releaseDate = this["releaseDate"]?.jsonPrimitive?.content?.toDate(),
-            description = this["description"]?.jsonPrimitive?.content.orEmpty()
+    fun JsonObject.toLastFmArtist(): Artist.Small? {
+        val name = this["name"]?.jsonPrimitive?.content ?: return null
+        val cover = (this["image"] as? JsonArray)
+            ?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
+
+        return Artist.Small(
+            id = "lastfm_artist_$name", // Create a unique-enough ID
+            name = name,
+            thumbnail = cover,
+            source = SOURCE
         )
     }
-
-    fun JsonObject.toArtist(): Artist {
-        // ... your original toArtist() code remains here, unchanged ...
-        return Artist(
-            id = this["id"]?.jsonPrimitive?.content.orEmpty(),
-            name = this["name"]?.jsonPrimitive?.content.orEmpty(),
-            cover = this["picture"]?.jsonPrimitive?.content?.toImageHolder(),
-            bio = this["bio"]?.jsonPrimitive?.content.orEmpty()
-        )
+    fun JsonObject.toAlbum(): Album.Small? {
+        val id = this["id"]?.jsonPrimitive?.content ?: return null
+        val title = this["title"]?.jsonPrimitive?.content ?: return null
+        val cover = this["cover"]?.jsonPrimitive?.content
+        return Album.Small(id, title, cover, SOURCE)
     }
 
-    fun JsonObject.toPlaylist(): Playlist {
-        // ... your original toPlaylist() code remains here, unchanged ...
-        val ownerJson = this["owner"]?.jsonObject
-        return Playlist(
-            id = this["id"]?.jsonPrimitive?.content.orEmpty(),
-            title = this["name"]?.jsonPrimitive?.content.orEmpty(),
-            cover = this["picture"]?.jsonPrimitive?.content?.toImageHolder(),
-            description = this["description"]?.jsonPrimitive?.content.orEmpty(),
-            trackCount = this["trackCount"]?.jsonPrimitive?.longOrNull,
-            isEditable = ownerJson?.get("id")?.jsonPrimitive?.content == "LOGGED_IN_USER_ID_PLACEHOLDER"
-        )
+    fun JsonObject.toArtist(): Artist.Small? {
+        val id = this["id"]?.jsonPrimitive?.content ?: return null
+        val name = this["name"]?.jsonPrimitive?.content ?: return null
+        val thumbnail = this["image"]?.jsonPrimitive?.content
+        return Artist.Small(id, name, thumbnail, SOURCE)
     }
 
-    private fun String.toDate(): EchoDate? {
-        // ... your original toDate() helper remains here, unchanged ...
-        return try {
-            val parts = this.split('-')
-            if (parts.size == 3) {
-                EchoDate(
-                    year = parts[0].toInt(),
-                    month = parts[1].toInt(),
-                    day = parts[2].toInt()
-                )
-            } else {
-                null
-            }
-        } catch (e: Exception) {
-            null
-        }
+    fun JsonObject.toPlaylist(): Playlist.Small? {
+        val id = this["id"]?.jsonPrimitive?.content ?: return null
+        val name = this["name"]?.jsonPrimitive?.content ?: return null
+        val trackCount = this["trackCount"]?.jsonPrimitive?.int
+        return Playlist.Small(id, name, null, SOURCE, trackCount)
+    }
+
+    fun JsonObject.toUser(): User {
+        val id = this["id"]?.jsonPrimitive?.int.toString()
+        val username = this["username"]?.jsonPrimitive?.content ?: "Unknown"
+        return User(id, username, null, SOURCE)
     }
 }

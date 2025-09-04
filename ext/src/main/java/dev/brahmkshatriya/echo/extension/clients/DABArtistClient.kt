@@ -1,84 +1,81 @@
 package dev.brahmkshatriya.echo.extension.clients
 
-import dev.brahmkshatriya.echo.common.helpers.PagedData
+import dev.brahmkshatriya.echo.common.clients.ArtistClient
+import dev.brahmkshatriya.echo.common.helpers.Page
+import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.Feed
-import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.Shelf
+import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.extension.DABApi
-import dev.brahmkshatriya.echo.extension.DABParser
-import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import dev.brahmkshatriya.echo.extension.DABParser.toAlbum // Import parser functions
+import dev.brahmkshatriya.echo.extension.DABParser.toTrack
 
-/**
- * Handles the business logic for fetching artist-related data.
- * It coordinates calls to the DABApi and uses the DABParser to format the responses
- * into UI-ready components like Shelves.
- *
- * @param api The authenticated DABApi client for making network calls.
- * @param parser The DABParser for converting JSON into application models.
- */
-class DABArtistClient(private val api: DABApi, private val parser: DABParser) {
-
-    /**
-     * Loads the full details for a specific artist from the API.
-     *
-     * @param artist A partial Artist object, usually containing just the ID.
-     * @return A full Artist object with all details populated.
-     */
-    suspend fun loadArtist(artist: Artist): Artist {
-        val artistJson = api.getArtist(artist.id)
-        return parser.run { artistJson.toArtist() }
+class DABArtistClient(private val api: DABApi) : ArtistClient {
+    override val source: String = "DAB"
+    override suspend fun getArtist(artist: Artist.Small): Feed {
+        val response = api.callApi(path = "/discography", queryParams = mapOf("artistId" to artist.id))
+        val artistName = response["artist"]?.jsonObject?.get("name")?.jsonPrimitive?.content ?: artist.name
+        val albumsJson = response["albums"] as? JsonArray ?: JsonArray(emptyList())
+        // Use the centralized parser
+        val albums = albumsJson.mapNotNull { it.jsonObject.toAlbum() }
+        val shelves = listOf(Shelf.Grid("$artistName's Albums", albums, null))
+        return Feed(shelves)
     }
 
-    /**
-     * Constructs the content shelves for an artist's page (e.g., Top Tracks, Albums).
-     * This function makes individual API calls for each section of the page.
-     *
-     * @param artist The artist for whom to build the page.
-     * @return A Feed of Shelf objects to be displayed in the UI.
-     */
-    fun getShelves(artist: Artist): Feed<Shelf> = PagedData.Single {
-        // This list will hold the shelves we build for the artist's page.
-        val shelves = mutableListOf<Shelf>()
+    override suspend fun getTopTracks(artist: Artist.Small, page: Int): Page<Track>? {
+        if (page > 1) return Page(emptyList(), false)
+        val response = api.callApi(path = "/discography", queryParams = mapOf("artistId" to artist.id))
+        val albumsJson = response["albums"] as? JsonArray ?: return null
+        // Use the centralized parser
+        val topTracks = albumsJson
+            .flatMap { it.jsonObject["tracks"] as? JsonArray ?: emptyList() }
+            .mapNotNull { it.jsonObject.toTrack() }
+            .take(20)
+        return Page(topTracks, false)
+    }
+}
 
-        // 1. Create a "Top Tracks" shelf.
-        // We call the dedicated endpoint for an artist's top tracks.
-        val topTracksJson = api.getArtistTopTracks(artist.id)
-        val topTracksArray = topTracksJson["tracks"]?.jsonArray
-        if (topTracksArray != null && topTracksArray.isNotEmpty()) {
-            // Use the parser to create a shelf from the list of tracks.
-            parser.run {
-                topTracksArray.toShelfItemsList(name = "Top Tracks", typeHint = "track")
-            }?.let { shelves.add(it) }
-        }
+    // We'll move these parser helpers to a dedicated file later.
+    private fun JsonObject.toAlbum(): Album.Small? {
+        val id = this["id"]?.jsonPrimitive?.content ?: return null
+        val title = this["title"]?.jsonPrimitive?.content ?: return null
+        val cover = this["cover"]?.jsonPrimitive?.content
+        return Album.Small(id, title, cover, "DAB")
+    }
 
-        // 2. Create an "Albums" shelf.
-        // We fetch the main artist data, assuming it contains their albums.
-        val artistJson = api.getArtist(artist.id)
-        val albumsArray = artistJson["albums"]?.jsonArray
-        if (albumsArray != null && albumsArray.isNotEmpty()) {
-            parser.run {
-                albumsArray.toShelfItemsList(name = "Albums", typeHint = "album")
-            }?.let { shelves.add(it) }
-        }
+    private fun JsonObject.toAlbumWithTracks(): Album? {
+        val id = this["id"]?.jsonPrimitive?.content ?: return null
+        val title = this["title"]?.jsonPrimitive?.content ?: return null
+        val cover = this["cover"]?.jsonPrimitive?.content
+        val tracksJson = this["tracks"] as? JsonArray ?: return null
+        val tracks = tracksJson.mapNotNull { it.jsonObject.toTrack(cover) }
+        return Album(id, title, cover, "DAB", null, tracks)
+    }
 
-        // Future shelves (e.g., "Related Artists") could be added here with more API calls.
-        // For example:
-        // val relatedArtistsJson = api.getRelatedArtists(artist.id)
-        // ... create shelf ...
+    private fun JsonObject.toTrack(albumCover: String?): Track? {
+        val id = this["id"]?.jsonPrimitive?.content ?: return null
+        val title = this["title"]?.jsonPrimitive?.content ?: return null
+        val artistName = this["artist"]?.jsonPrimitive?.content
+        val artistId = this["artistId"]?.jsonPrimitive?.content
+        val artists = if (artistName != null && artistId != null) {
+            listOf(Artist.Small(artistId, artistName, null, "DAB"))
+        } else emptyList()
 
-        shelves
-    }.toFeed()
-
-
-    /**
-     * A simple helper to get the follower count from the artist's extras map.
-     * The parser is responsible for putting the data there.
-     *
-     * @param artist The artist object.
-     * @return The number of followers, or null if not available.
-     */
-    fun getFollowersCount(artist: Artist): Long? {
-        return artist.extras["followers"]?.toLongOrNull()
+        return Track(
+            source = "DAB",
+            id = id,
+            title = title,
+            artists = artists,
+            album = null,
+            cover = albumCover,
+            duration = this["duration"]?.jsonPrimitive?.int?.toLong(),
+            streamable = true
+        )
     }
 }

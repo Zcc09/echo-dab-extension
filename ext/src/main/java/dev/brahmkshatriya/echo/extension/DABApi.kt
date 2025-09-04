@@ -1,7 +1,13 @@
 package dev.brahmkshatriya.echo.extension
 
-import dev.brahmkshatriya.echo.common.helpers.ContinuationCallback.Companion.await
+
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.Request
+import okhttp3.Response
+import java.io.FilterInputStream
+import java.io.InputStream
+import dev.brahmkshatriya.echo.common.helpers.ContinuationCallback.Companion.await
 import kotlinx.coroutines.async
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
@@ -15,13 +21,15 @@ import kotlinx.serialization.json.decodeFromStream
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.io.InputStream
+
 
 /**
  * Handles all network interactions with the DAB API.
@@ -39,20 +47,32 @@ class DABApi(private val session: DABSession) {
             useArrayPolymorphism = true
         }
         private const val BASE_URL = "https://dab.yeet.su/api"
-        private const val LASTFM_BASE_URL = "http://ws.audioscrobbler.com/2.0/"
-        private const val LASTFM_API_KEY = "119e1fe4ac820c0e8a64fccdb8dbca98" // <-- IMPORTANT: Replace this
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 
     /**
-     * Retrieves the auth token from the session.
-     * Throws an IllegalStateException if the user is not logged in, preventing API calls.
+     * Custom exception for DAB API errors.
      */
-    private val token: String
-        get() = session.credentials?.token
-            ?: throw IllegalStateException("Cannot make API call: User is not logged in.")
+    class DABApiException(val code: Int, message: String) : Exception("API Error $code: $message")
 
-    private val client: OkHttpClient by lazy { OkHttpClient() }
+    // CookieJar to handle session cookies for authentication.
+    private val cookieJar = object : CookieJar {
+        private val cookieStore = mutableMapOf<String, List<Cookie>>()
+
+        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+            cookieStore[url.host] = cookies
+        }
+
+        override fun loadForRequest(url: HttpUrl): List<Cookie> {
+            return cookieStore[url.host] ?: emptyList()
+        }
+    }
+
+    private val client: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .cookieJar(cookieJar)
+            .build()
+    }
 
     /**
      * A generic, internal function to make calls to the primary DAB API.
@@ -77,14 +97,14 @@ class DABApi(private val session: DABSession) {
 
         val requestBuilder = Request.Builder()
             .url(urlBuilder.build())
-            .addHeader("Authorization", "Bearer $token") // Uses the token from the session
+            // Removed Authorization header, authentication is now handled by the CookieJar.
             .addHeader("Content-Type", "application/json")
             .addHeader("Accept", "application/json")
 
         when (method.uppercase()) {
             "GET" -> requestBuilder.get()
             "POST" -> requestBuilder.post(requestBody ?: "".toRequestBody(null))
-            "DELETE" -> requestBuilder.delete(requestBody)
+            "DELETE" -> requestBuilder.delete() // Corrected for DELETE with query params
             "PUT" -> requestBuilder.put(requestBody ?: "".toRequestBody(null))
             else -> throw IllegalArgumentException("Unsupported HTTP method: $method")
         }
@@ -92,22 +112,129 @@ class DABApi(private val session: DABSession) {
         client.newCall(requestBuilder.build()).await().use { response ->
             if (response.body.contentLength() == 0L) {
                 if (response.isSuccessful) return@withContext JsonObject(emptyMap())
-                else throw Exception("API call failed with status ${response.code} and empty body")
+                else throw DABApiException(response.code, "API call failed with empty body")
             }
 
             val result = response.body.source().use { decodeJsonStream(it.inputStream()) }
 
             if (!response.isSuccessful) {
                 val errorMessage = result["message"]?.jsonPrimitive?.content ?: "Unknown API error"
-                throw Exception("API call failed with status ${response.code}: $errorMessage")
+                throw DABApiException(response.code, errorMessage)
             }
             return@withContext result
         }
     }
+    suspend fun getAudioStream(trackId: String): InputStream {
+        // First, get the stream URL from our API
+        val streamUrlResponse = callApi(
+            path = "/stream",
+            queryParams = mapOf("trackId" to trackId)
+        )
+        val streamUrl = streamUrlResponse["streamUrl"]?.jsonPrimitive?.content
+            ?: throw Exception("Could not get stream URL")
+
+        // Now, make a new request to that URL to get the raw audio data
+        val request = Request.Builder().url(streamUrl).build()
+        val response = withContext(Dispatchers.IO) {
+            client.newCall(request).execute()
+        }
+
+        if (!response.isSuccessful) {
+            response.close()
+            throw Exception("Failed to fetch audio stream: ${response.code}")
+        }
+
+        // Return the input stream wrapped in a class that will close the response when done.
+        return ResponseInputStream(response)
+    }
 
     /**
-     * A generic, internal function to make calls to the Last.fm API.
+     * An InputStream that closes the OkHttp Response when the stream is closed.
+     * This is crucial for preventing resource leaks.
      */
+    private class ResponseInputStream(private val response: Response) :
+        FilterInputStream(response.body!!.byteStream()) {
+        override fun close() {
+            // Close the OkHttp response body, which also closes the underlying stream.
+            response.close()
+            super.close()
+        }
+    }
+
+    //<============= Home Feed =============>
+    suspend fun getHomeFeed(): JsonObject {
+        val lastFmApi = LastFmApi()
+        return lastFmApi.getHomeFeed()
+    }
+
+
+    //<============= User Features =============>
+    suspend fun getMe(): JsonObject = callApi(path = "/auth/me")
+    suspend fun getFavorites(): JsonObject = callApi(path = "/favorites")
+
+    suspend fun addFavorite(track: JsonObject): JsonObject {
+        return callApi(path = "/favorites", method = "POST") {
+            put("track", track)
+        }
+    }
+
+    suspend fun removeFavorite(trackId: String): JsonObject {
+        return callApi(
+            path = "/favorites",
+            method = "DELETE",
+            queryParams = mapOf("trackId" to trackId)
+        )
+    }
+
+
+    //<============= Search =============>
+
+    suspend fun search(query: String): JsonObject {
+        return callApi(path = "/search", queryParams = mapOf("q" to query))
+    }
+
+
+    //<============= Playlists =============>
+
+    suspend fun getPlaylist(playlistId: String): JsonObject {
+        return callApi(path = "/libraries/$playlistId")
+    }
+    suspend fun getUserPlaylists(): JsonObject {
+        return callApi(path = "/libraries")
+    }
+
+    //<============= JSON Helpers =============>
+
+    @OptIn(ExperimentalSerializationApi::class)
+    private suspend fun decodeJsonStream(stream: InputStream): JsonObject = withContext(Dispatchers.Default) {
+        json.decodeFromStream(stream)
+    }
+
+    private suspend fun encodeJson(raw: JsonObjectBuilder.() -> Unit = {}): String = withContext(Dispatchers.IO) {
+        json.encodeToString(buildJsonObject(raw))
+    }
+}
+
+
+/**
+ * Handles all network interactions with the Last.fm API.
+ */
+class LastFmApi {
+
+    companion object {
+        private val json = Json {
+            isLenient = true
+            ignoreUnknownKeys = true
+            useArrayPolymorphism = true
+        }
+        private const val LASTFM_BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+        // IMPORTANT: Move this to your local.properties and access via BuildConfig
+        private const val LASTFM_API_KEY = "YOUR_LASTFM_API_KEY"
+    }
+
+    private val client: OkHttpClient by lazy { OkHttpClient() }
+
+
     private suspend fun callLastFmApi(queryParams: Map<String, String>): JsonObject = withContext(Dispatchers.IO) {
         val urlBuilder = LASTFM_BASE_URL.toHttpUrl().newBuilder()
 
@@ -126,12 +253,10 @@ class DABApi(private val session: DABSession) {
             if (!response.isSuccessful) {
                 throw Exception("Last.fm API call failed with status ${response.code}")
             }
-            return@withContext response.body.source().use { decodeJsonStream(it.inputStream()) }
+            return@use response.body.source().use { json.decodeFromStream(it.inputStream()) }
         }
     }
 
-
-    //<============= Home Feed =============>
 
     suspend fun getHomeFeed(): JsonObject = supervisorScope {
         val topTracksDeferred = async {
@@ -204,60 +329,5 @@ class DABApi(private val session: DABSession) {
         return@supervisorScope buildJsonObject {
             put("sections", sections)
         }
-    }
-
-    //<============= User Features =============>
-    suspend fun getMe(): JsonObject = callApi(path = "/me")
-    suspend fun getFavorites(): JsonObject = callApi(path = "/favorites")
-    suspend fun addFavorite(itemId: String, itemType: String): JsonObject {
-        return callApi(path = "/favorites", method = "POST") {
-            put("id", itemId) // Use "id" as per OpenAPI spec
-            put("type", itemType) }
-    }
-    suspend fun removeFavorite(itemId: String, itemType: String): JsonObject {
-        return callApi(path = "/favorites", method = "DELETE") {
-            put("id", itemId) // Use "id" as per OpenAPI spec
-            put("type", itemType)
-        }
-    }
-
-    //<============= Search =============>
-
-    suspend fun search(query: String): JsonObject {
-        return callApi(path = "/search", queryParams = mapOf("q" to query))
-    }
-
-    //<============= Tracks =============>
-
-    private val dabTrack by lazy { DABTrack(this) }
-    suspend fun getTrack(trackId: String) = dabTrack.getTrack(trackId)
-    suspend fun getLyrics(trackId: String) = dabTrack.getLyrics(trackId)
-
-    //<============= Albums =============>
-
-    private val dabAlbum by lazy { DABAlbum(this) }
-    suspend fun getAlbum(albumId: String) = dabAlbum.getAlbum(albumId)
-
-    //<============= Artists =============>
-
-    private val dabArtist by lazy { DABArtist(this) }
-    suspend fun getArtist(artistId: String) = dabArtist.getArtist(artistId)
-    suspend fun getArtistTopTracks(artistId: String) = dabArtist.getArtistTopTracks(artistId)
-
-    //<============= Playlists =============>
-
-    private val dabPlaylist by lazy { DABPlaylist(this) }
-    suspend fun getPlaylist(playlistId: String) = dabPlaylist.getPlaylist(playlistId)
-    suspend fun getUserPlaylists(userId: DABSession) = dabPlaylist.getUserPlaylists(userId)
-
-    //<============= JSON Helpers =============>
-
-    @OptIn(ExperimentalSerializationApi::class)
-    private suspend fun decodeJsonStream(stream: InputStream): JsonObject = withContext(Dispatchers.Default) {
-        json.decodeFromStream(stream)
-    }
-
-    private suspend fun encodeJson(raw: JsonObjectBuilder.() -> Unit = {}): String = withContext(Dispatchers.IO) {
-        json.encodeToString(buildJsonObject(raw))
     }
 }
