@@ -1,7 +1,12 @@
 package dev.brahmkshatriya.echo.extension
 
-import dev.brahmkshatriya.echo.common.models.*
+import dev.brahmkshatriya.echo.common.models.Album
+import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
+import dev.brahmkshatriya.echo.common.models.Playlist
+import dev.brahmkshatriya.echo.common.models.Streamable
+import dev.brahmkshatriya.echo.common.models.Track
+import dev.brahmkshatriya.echo.common.models.User
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
@@ -26,7 +31,12 @@ object DABParser {
         val albumTitle = this["albumTitle"]?.jsonPrimitive?.content
         val albumId = this["albumId"]?.jsonPrimitive?.content
         val album = if (albumTitle != null && albumId != null) {
-            Album("album:$albumId", albumTitle, coverUrl?.toImageHolder(), artists, null)
+            Album(
+                id = "album:$albumId",
+                title = albumTitle,
+                cover = coverUrl?.toImageHolder(),
+                artists = artists
+            )
         } else {
             null
         }
@@ -48,12 +58,12 @@ object DABParser {
         val title = this["title"]?.jsonPrimitive?.content ?: return null
         val coverUrl = this["cover"]?.jsonPrimitive?.content
         val artistName = this["artist"]?.jsonPrimitive?.content
-        val artist = if(artistName != null) Artist(artistName, "artist:$artistName") else null
+        val artist = if (artistName != null) Artist(artistName, "artist:$artistName") else null
         return Album(
             id = "album:$id",
             title = title,
             cover = coverUrl?.toImageHolder(),
-            artists = if(artist != null) listOf(artist) else emptyList(),
+            artists = if (artist != null) listOf(artist) else emptyList(),
             releaseDate = null
         )
     }
@@ -102,7 +112,8 @@ object DABParser {
             album = null,
             cover = coverUrl?.toImageHolder(),
             duration = this["duration"]?.jsonPrimitive?.int?.toLong(),
-            isPlayable = Track.Playable.No,
+            // FIX: Added the required 'reason' argument to the constructor.
+            isPlayable = Track.Playable.No("Not streamable"),
             streamables = emptyList()
         )
     }

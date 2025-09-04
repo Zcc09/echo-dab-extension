@@ -17,10 +17,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
 
 class DABApi(
-    val session: DABSession,
+    private val session: DABSession,
     private val client: OkHttpClient
 ) {
 
@@ -85,27 +84,6 @@ class DABApi(
             }
             return@withContext result
         }
-    }
-
-    suspend fun getAudioStream(trackId: String): InputStream {
-        val streamUrlResponse = callApi(
-            path = "/stream",
-            queryParams = mapOf("trackId" to trackId)
-        )
-        val streamUrl = streamUrlResponse["streamUrl"]?.jsonPrimitive?.content
-            ?: throw Exception("Could not get stream URL")
-
-        val request = Request.Builder().url(streamUrl).build()
-        val response = withContext(Dispatchers.IO) {
-            client.newCall(request).execute()
-        }
-
-        if (!response.isSuccessful) {
-            response.close()
-            throw Exception("Failed to fetch audio stream: ${response.code}")
-        }
-
-        return response.body!!.byteStream()
     }
 
     @OptIn(ExperimentalSerializationApi::class)

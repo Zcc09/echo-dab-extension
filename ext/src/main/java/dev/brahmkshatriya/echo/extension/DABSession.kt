@@ -7,7 +7,7 @@ import kotlinx.serialization.json.Json
 class DABSession(
     private val settings: Settings,
 ) {
-    private var user: User? = settings.get("user")?.let {
+    private var user: User? = settings.get<String?>("user", null)?.let {
         try {
             Json.decodeFromString(User.serializer(), it)
         } catch (e: Exception) {
@@ -22,7 +22,7 @@ class DABSession(
 
     fun logout() {
         user = null
-        settings.remove("user")
+        settings.set("user", null)
     }
 
     fun getLoggedInUser(): User? {
