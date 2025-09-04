@@ -10,9 +10,12 @@ class DABTrackClient(private val api: DABApi) : TrackClient {
     override val source: String = "DAB"
 
     override suspend fun getStreamable(track: Track): Streamable? {
-        // Get the InputStream directly from the API
-        val inputStream = api.getAudioStream(track.id)
-        // Return it as a Streamable.Stream
-        return Streamable.Stream(inputStream)
+        return try {
+            val inputStream = api.getAudioStream(track.id)
+            Streamable.Stream(inputStream)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
     }
 }

@@ -5,6 +5,7 @@ import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
@@ -47,38 +48,7 @@ object DABParser {
             streamable = true
         )
     }
-    fun JsonObject.toLastFmTrack(): Track? {
-        val title = this["name"]?.jsonPrimitive?.content ?: return null
-        val artistName = this["artist"]?.jsonObject?.get("name")?.jsonPrimitive?.content ?: "Unknown"
 
-        // Last.fm provides multiple image sizes in an array. We'll try to find the largest one.
-        val cover = (this["image"] as? JsonArray)
-            ?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
-
-        return Track(
-            source = SOURCE,
-            id = "lastfm_track_${artistName}_${title}", // Create a unique-enough ID
-            title = title,
-            artists = listOf(Artist.Small("lastfm_artist_$artistName", artistName, null, SOURCE)),
-            album = null,
-            cover = cover,
-            duration = this["duration"]?.jsonPrimitive?.int?.toLong(),
-            streamable = false // Tracks from Last.fm are for metadata only
-        )
-    }
-
-    fun JsonObject.toLastFmArtist(): Artist.Small? {
-        val name = this["name"]?.jsonPrimitive?.content ?: return null
-        val cover = (this["image"] as? JsonArray)
-            ?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
-
-        return Artist.Small(
-            id = "lastfm_artist_$name", // Create a unique-enough ID
-            name = name,
-            thumbnail = cover,
-            source = SOURCE
-        )
-    }
     fun JsonObject.toAlbum(): Album.Small? {
         val id = this["id"]?.jsonPrimitive?.content ?: return null
         val title = this["title"]?.jsonPrimitive?.content ?: return null
@@ -104,5 +74,40 @@ object DABParser {
         val id = this["id"]?.jsonPrimitive?.int.toString()
         val username = this["username"]?.jsonPrimitive?.content ?: "Unknown"
         return User(id, username, null, SOURCE)
+    }
+
+    fun JsonObject.toLastFmTrack(): Track? {
+        val title = this["name"]?.jsonPrimitive?.content ?: return null
+        val artistJson = this["artist"]?.jsonObject
+        val artistName = artistJson?.get("name")?.jsonPrimitive?.content ?: "Unknown"
+        val artistMbid = artistJson?.get("mbid")?.jsonPrimitive?.content
+
+        val cover = (this["image"] as? JsonArray)
+            ?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
+
+        return Track(
+            source = SOURCE,
+            id = "lastfm:${artistMbid ?: artistName}:$title", // More robust ID
+            title = title,
+            artists = listOf(Artist.Small("lastfm:${artistMbid ?: artistName}", artistName, null, SOURCE)),
+            album = null,
+            cover = cover,
+            duration = this["duration"]?.jsonPrimitive?.int?.toLong(),
+            streamable = false
+        )
+    }
+
+    fun JsonObject.toLastFmArtist(): Artist.Small? {
+        val name = this["name"]?.jsonPrimitive?.content ?: return null
+        val mbid = this["mbid"]?.jsonPrimitive?.content
+        val cover = (this["image"] as? JsonArray)
+            ?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
+
+        return Artist.Small(
+            id = "lastfm:${mbid ?: name}", // More robust ID
+            name = name,
+            thumbnail = cover,
+            source = SOURCE
+        )
     }
 }
