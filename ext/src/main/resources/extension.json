@@ -1,9 +1,0 @@
-{
-  "id": "@extId@",
-  "name": "@extName@",
-  "version": "@verName@",
-  "author": "@extAuthor@",
-  "description": "@extDescription@",
-  "main": "@extClass@"
-}
-
