@@ -1,19 +1,19 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="app" type="AndroidRunConfigurationType" factoryName="Android App" activateToolWindowBeforeRun="false" singleton="true">
-    <module name="Test_Extension.app" />
+    <module name="DAB_Music_Player_Extension.app" />
     <option name="ANDROID_RUN_CONFIGURATION_SCHEMA_VERSION" value="1" />
     <option name="DEPLOY" value="true" />
     <option name="DEPLOY_APK_FROM_BUNDLE" value="false" />
     <option name="DEPLOY_AS_INSTANT" value="false" />
     <option name="ARTIFACT_NAME" value="" />
     <option name="PM_INSTALL_OPTIONS" value="" />
-    <option name="ALL_USERS" value="false" />
+    <option name="ALL_USERS" value="true" />
     <option name="ALWAYS_INSTALL_WITH_PM" value="true" />
     <option name="ALLOW_ASSUME_VERIFIED" value="false" />
     <option name="CLEAR_APP_STORAGE" value="false" />
     <option name="DYNAMIC_FEATURES_DISABLED_LIST" value="" />
     <option name="ACTIVITY_EXTRA_FLAGS" value="" />
-    <option name="MODE" value="specific_activity" />
+    <option name="MODE" value="default_activity" />
     <option name="RESTORE_ENABLED" value="false" />
     <option name="RESTORE_FILE" value="" />
     <option name="RESTORE_FRESH_INSTALL_ONLY" value="false" />

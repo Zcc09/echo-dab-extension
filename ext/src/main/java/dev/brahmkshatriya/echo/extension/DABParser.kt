@@ -18,10 +18,20 @@ object DABParser {
         val title = this["title"]?.jsonPrimitive?.content ?: return null
         val coverUrl = this["albumCover"]?.jsonPrimitive?.content
         val duration = this["duration"]?.jsonPrimitive?.int?.toLong()
+
+        // Artist Parsing
         val artistName = this["artist"]?.jsonPrimitive?.content
-        val artists = if (artistName != null) listOf(Artist(artistName, artistName)) else emptyList()
+        val artists = if (artistName != null) {
+            listOf(Artist(id = artistName, name = artistName))
+        } else {
+            emptyList()
+        }
+
+        // Album Parsing
         val albumTitle = this["albumTitle"]?.jsonPrimitive?.content
-        val album = if (albumTitle != null) Album(
+        val albumId = this["albumId"]?.jsonPrimitive?.content
+        val album = if (albumTitle != null && albumId != null) Album(
+            id = albumId,
             title = albumTitle,
             cover = coverUrl?.toImageHolder(),
             artists = artists
@@ -44,7 +54,7 @@ object DABParser {
         val title = this["title"]?.jsonPrimitive?.content ?: return null
         val coverUrl = this["cover"]?.jsonPrimitive?.content
         val artistName = this["artist"]?.jsonPrimitive?.content
-        val artist = if (artistName != null) Artist(artistName, artistName) else null
+        val artist = if (artistName != null) Artist(id = artistName, name = artistName) else null
         return Album(
             id = id,
             title = title,

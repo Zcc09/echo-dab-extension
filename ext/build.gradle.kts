@@ -7,6 +7,7 @@ plugins {
 }
 
 dependencies {
+    implementation(libs.identity.jvm)
     compileOnly(libs.echo.common)
     compileOnly(libs.kotlin.stdlib)
 

@@ -5,7 +5,6 @@ import dev.brahmkshatriya.echo.common.clients.ArtistClient
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
 import dev.brahmkshatriya.echo.common.clients.HomeFeedClient
 import dev.brahmkshatriya.echo.common.clients.LibraryFeedClient
-import dev.brahmkshatriya.echo.common.clients.LoginClient
 import dev.brahmkshatriya.echo.common.clients.LyricsClient
 import dev.brahmkshatriya.echo.common.clients.PlaylistClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
@@ -33,7 +32,6 @@ import kotlinx.serialization.json.jsonObject
 
 class DABExtension :
     ExtensionClient,
-    LoginClient.Simple,
     HomeFeedClient,
     SearchFeedClient,
     LibraryFeedClient,
@@ -52,36 +50,15 @@ class DABExtension :
     }
 
     override suspend fun getSettingItems(): List<Setting> {
-        return listOf(
-            Setting.TextInput(
-                key = "lastfm_api_key",
-                title = "Last.fm API Key",
-                subtitle = "Required for the Home feed",
-                value = settings.getString("lastfm_api_key") ?: ""
-            )
-        )
+        return emptyList()
     }
 
-    // LoginClient
-    override val loginCredentials: List<Setting>
-        get() = listOf(
-            Setting.TextInput(key = "email", title = "Email", value = ""),
-            Setting.TextInput(key = "password", title = "Password", private = true, value = "")
-        )
+    override suspend fun loadHomeFeed(): Feed<Shelf> {
+        val apiKey = "YOUR_API_KEY_HERE"
 
-    override suspend fun login(inputs: Map<String, String>): User {
-        val email = inputs["email"] ?: error("Email is required")
-        val password = inputs["password"] ?: error("Password is required")
-        val response = api.login(email, password)
-        val userJson = response["user"]?.jsonObject ?: error("Login failed")
-        return userJson.toUser()
-    }
-
-    // HomeFeedClient
-    override suspend fun loadHomeFeed(): Feed.Data<Shelf> {
-        val apiKey = settings.getString("lastfm_api_key")
-        if (apiKey.isNullOrBlank()) {
-            return Feed.Data(emptyList())
+        if (apiKey == "YOUR_API_KEY_HERE" || apiKey.isBlank()) {
+            // FIX: Use Feed.Page and explicitly state the type for the empty list.
+            return Feed.Page(emptyList<Shelf>())
         }
         val response = LastFmApi(apiKey).getHomeFeed()
         val shelves = response["sections"]?.let { sections ->
@@ -94,10 +71,9 @@ class DABExtension :
                 Shelf.Lists.Tracks(title, title, items)
             }
         } ?: emptyList()
-        return Feed.Data(shelves)
+        return Feed.Page(shelves) // FIX: Use Feed.Page
     }
 
-    // SearchFeedClient
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> = coroutineScope {
         val tracksDeferred = async { api.search(query, "track") }
         val albumsDeferred = async { api.search(query, "album") }
@@ -117,35 +93,31 @@ class DABExtension :
             ?.let { (it as JsonArray).mapNotNull { item -> item.jsonObject.toArtist() } }
         if (!artists.isNullOrEmpty()) shelves.add(Shelf.Lists.Items("artists", "Artists", artists))
 
-        return@coroutineScope Feed.Single(shelves)
+        return@coroutineScope Feed.Page(shelves) // FIX: Use Feed.Page
     }
 
 
-    // LibraryFeedClient
     override suspend fun loadLibraryFeed(): Feed<Shelf> {
         val libraries = api.getLibraries()
         val playlists = libraries["libraries"]
             ?.let { (it as JsonArray).mapNotNull { item -> item.jsonObject.toPlaylist() } }
             ?: emptyList()
-        return Feed.Data(listOf(Shelf.Lists.Items("playlists", "Playlists", playlists)))
+        return Feed.Page(listOf(Shelf.Lists.Items("playlists", "Playlists", playlists))) // FIX: Use Feed.Page
     }
 
-    // AlbumClient
     override suspend fun loadAlbum(album: Album): Album {
         val albumDetails = api.getAlbum(album.id)
         return albumDetails["album"]?.jsonObject?.toAlbum() ?: album
     }
 
-    override suspend fun loadTracks(album: Album): Feed.Data<Track> {
+    override suspend fun loadTracks(album: Album): Feed<Track> {
         val albumDetails = api.getAlbum(album.id)
         val tracks = albumDetails["album"]?.jsonObject?.get("tracks")
             ?.let { (it as JsonArray).mapNotNull { item -> item.jsonObject.toTrack() } }
             ?: emptyList()
-        return Feed.Data(tracks)
+        return Feed.Page(tracks) // FIX: Use Feed.Page
     }
 
-
-    // ArtistClient
     override suspend fun loadArtist(artist: Artist): Artist {
         val discography = api.getDiscography(artist.id)
         return discography["artist"]?.jsonObject?.toArtist() ?: artist
@@ -156,48 +128,48 @@ class DABExtension :
         val albums = discography["albums"]
             ?.let { (it as JsonArray).mapNotNull { item -> item.jsonObject.toAlbum() } }
             ?: emptyList()
-        return Feed.Data(listOf(Shelf.Lists.Items("albums", "Albums", albums)))
+        return Feed.Page(listOf(Shelf.Lists.Items("albums", "Albums", albums))) // FIX: Use Feed.Page
     }
 
-
-    // PlaylistClient
     override suspend fun loadPlaylist(playlist: Playlist): Playlist {
         val playlistDetails = api.getLibrary(playlist.id)
         return playlistDetails["library"]?.jsonObject?.toPlaylist() ?: playlist
     }
 
-    override suspend fun loadTracks(playlist: Playlist): Feed.Data<Track> {
+    override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
         val playlistDetails = api.getLibrary(playlist.id, 1)
         val tracks = playlistDetails["library"]?.jsonObject?.get("tracks")
             ?.let { (it as JsonArray).mapNotNull { item -> item.jsonObject.toTrack() } }
             ?: emptyList()
-        return Feed.Data(tracks)
+        return Feed.Page(tracks) // FIX: Use Feed.Page
     }
 
-    // TrackClient
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
         return track
     }
 
     override suspend fun loadStreamableMedia(streamable: Streamable, isDownload: Boolean): Streamable.Media {
         val streamUrl = api.getStreamUrl(streamable.id)
-        return Streamable.Media.create(streamUrl["streamUrl"].toString())
+        return Streamable.Media(url = streamUrl["streamUrl"].toString()) // FIX: Use direct constructor
     }
 
-    // LyricsClient
-    override suspend fun searchTrackLyrics(clientId: String, track: Track): Feed.Data<Lyrics> {
-        val artist = track.artists.firstOrNull()?.name ?: return Feed.Data(emptyList())
+    override suspend fun searchTrackLyrics(clientId: String, track: Track): Feed<Lyrics> {
+        val artist = track.artists.firstOrNull()?.name ?: return Feed.Page(emptyList<Lyrics>())
         val lyricsJson = api.getLyrics(artist, track.title)
         val lyricsText = lyricsJson["lyrics"]?.toString()
         return if (lyricsText != null) {
             val isSynced = lyricsJson["unsynced"]?.toString()?.toBoolean() == false
-            Feed.Data(listOf(Lyrics(lyricsText, isSynced)))
+            Feed.Page(listOf(Lyrics(lyricsText, if (isSynced) Lyrics.Type.SYNCED else Lyrics.Type.UNSYNCED)))
         } else {
-            Feed.Data(emptyList())
+            Feed.Page(emptyList<Lyrics>())
         }
     }
 
     override suspend fun loadLyrics(lyrics: Lyrics): Lyrics {
         return lyrics
     }
+
+    override suspend fun loadFeed(album: Album): Feed<Shelf>? = null
+    override suspend fun loadFeed(playlist: Playlist): Feed<Shelf>? = null
+    override suspend fun loadFeed(track: Track): Feed<Shelf>? = null
 }
