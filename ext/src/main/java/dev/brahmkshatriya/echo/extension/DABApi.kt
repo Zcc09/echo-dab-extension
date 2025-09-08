@@ -1,6 +1,8 @@
 package dev.brahmkshatriya.echo.extension
 
 import dev.brahmkshatriya.echo.common.helpers.ContinuationCallback.Companion.await
+import dev.brahmkshatriya.echo.common.models.ImageHolder
+import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.settings.Settings
 import java.io.InputStream
 import kotlinx.coroutines.Dispatchers
@@ -12,6 +14,7 @@ import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromStream
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
@@ -91,12 +94,13 @@ class DABApi {
         when (method.uppercase()) {
             "GET" -> requestBuilder.get()
             "POST" -> requestBuilder.post(requestBody ?: "".toRequestBody(null))
+            "DELETE" -> requestBuilder.delete()
             else -> throw IllegalArgumentException("Unsupported HTTP method: $method")
         }
 
         client.newCall(requestBuilder.build()).await().use { response ->
             if (response.body?.contentLength() == 0L) {
-                if (response.isSuccessful) return@withContext JsonObject(emptyMap())
+                if (response.isSuccessful) return@use JsonObject(emptyMap())
                 else throw DABApiException(response.code, "API call failed with empty body")
             }
 
@@ -118,6 +122,8 @@ class DABApi {
         put("password", pass)
     }
 
+    suspend fun me() = call(path = "/auth/me")
+
     suspend fun search(query: String, type: String) =
         call("/search", queryParams = mapOf("q" to query, "type" to type))
 
@@ -131,9 +137,33 @@ class DABApi {
     suspend fun getLyrics(artist: String, title: String) =
         call("/lyrics", queryParams = mapOf("artist" to artist, "title" to title))
 
+    suspend fun getFavorites() = call(path = "/favorites")
+
+    suspend fun addToFavorites(track: Track) = call(
+        path = "/favorites",
+        method = "POST"
+    ) {
+        putJsonObject("track") {
+            put("id", track.id)
+            put("title", track.title)
+            put("artist", track.artists.firstOrNull()?.name)
+            put("artistId", track.artists.firstOrNull()?.id)
+            put("albumTitle", track.album?.title)
+            put("albumCover", (track.album?.cover as? ImageHolder.NetworkRequestImageHolder)?.request?.url)
+            put("albumId", track.album?.id)
+            put("duration", track.duration?.div(1000))
+        }
+    }
+
+    suspend fun removeFromFavorites(trackId: String) = call(
+        path = "/favorites",
+        method = "DELETE",
+        queryParams = mapOf("trackId" to trackId)
+    )
 
     @OptIn(ExperimentalSerializationApi::class)
     private suspend fun decodeJsonStream(stream: InputStream): JsonObject = withContext(Dispatchers.Default) {
         json.decodeFromStream(stream)
     }
 }
+
