@@ -7,10 +7,8 @@ import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 object DABParser {
@@ -20,26 +18,14 @@ object DABParser {
         val title = this["title"]?.jsonPrimitive?.content ?: return null
         val coverUrl = this["albumCover"]?.jsonPrimitive?.content
         val duration = this["duration"]?.jsonPrimitive?.int?.toLong()
-
         val artistName = this["artist"]?.jsonPrimitive?.content
-        val artists = if (artistName != null) {
-            listOf(Artist(artistName, "artist:$artistName"))
-        } else {
-            emptyList()
-        }
-
+        val artists = if (artistName != null) listOf(Artist(artistName, artistName)) else emptyList()
         val albumTitle = this["albumTitle"]?.jsonPrimitive?.content
-        val albumId = this["albumId"]?.jsonPrimitive?.content
-        val album = if (albumTitle != null && albumId != null) {
-            Album(
-                id = "album:$albumId",
-                title = albumTitle,
-                cover = coverUrl?.toImageHolder(),
-                artists = artists
-            )
-        } else {
-            null
-        }
+        val album = if (albumTitle != null) Album(
+            title = albumTitle,
+            cover = coverUrl?.toImageHolder(),
+            artists = artists
+        ) else null
 
         return Track(
             id = id,
@@ -58,13 +44,12 @@ object DABParser {
         val title = this["title"]?.jsonPrimitive?.content ?: return null
         val coverUrl = this["cover"]?.jsonPrimitive?.content
         val artistName = this["artist"]?.jsonPrimitive?.content
-        val artist = if (artistName != null) Artist(artistName, "artist:$artistName") else null
+        val artist = if (artistName != null) Artist(artistName, artistName) else null
         return Album(
-            id = "album:$id",
+            id = id,
             title = title,
             cover = coverUrl?.toImageHolder(),
-            artists = if (artist != null) listOf(artist) else emptyList(),
-            releaseDate = null
+            artists = if (artist != null) listOf(artist) else emptyList()
         )
     }
 
@@ -73,7 +58,7 @@ object DABParser {
         val name = this["name"]?.jsonPrimitive?.content ?: return null
         val thumbnailUrl = this["image"]?.jsonPrimitive?.content
         return Artist(
-            id = "artist:$id",
+            id = id,
             name = name,
             cover = thumbnailUrl?.toImageHolder()
         )
@@ -84,9 +69,8 @@ object DABParser {
         val name = this["name"]?.jsonPrimitive?.content ?: return null
         val trackCount = this["trackCount"]?.jsonPrimitive?.int
         return Playlist(
-            id = "playlist:$id",
+            id = id,
             title = name,
-            cover = null,
             trackCount = trackCount?.toLong(),
             isEditable = false
         )
@@ -95,37 +79,6 @@ object DABParser {
     fun JsonObject.toUser(): User {
         val id = this["id"]?.jsonPrimitive?.int.toString()
         val username = this["username"]?.jsonPrimitive?.content ?: "Unknown"
-        return User(id, username, null)
-    }
-
-    fun JsonObject.toLastFmTrack(): Track? {
-        val title = this["name"]?.jsonPrimitive?.content ?: return null
-        val artistJson = this["artist"]?.jsonObject
-        val artistName = artistJson?.get("name")?.jsonPrimitive?.content ?: "Unknown"
-        val coverUrl = (this["image"] as? JsonArray)
-            ?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
-
-        return Track(
-            id = "lastfm_track:${artistName}_${title}",
-            title = title,
-            artists = listOf(Artist(artistName, "lastfm_artist:$artistName")),
-            album = null,
-            cover = coverUrl?.toImageHolder(),
-            duration = this["duration"]?.jsonPrimitive?.int?.toLong(),
-            // FIX: Added the required 'reason' argument to the constructor.
-            isPlayable = Track.Playable.No("Not streamable"),
-            streamables = emptyList()
-        )
-    }
-
-    fun JsonObject.toLastFmArtist(): Artist? {
-        val name = this["name"]?.jsonPrimitive?.content ?: return null
-        val coverUrl = (this["image"] as? JsonArray)
-            ?.lastOrNull()?.jsonObject?.get("#text")?.jsonPrimitive?.content
-        return Artist(
-            id = "lastfm_artist:$name",
-            name = name,
-            cover = coverUrl?.toImageHolder()
-        )
+        return User(id, username)
     }
 }
