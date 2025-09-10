@@ -1,6 +1,6 @@
 [versions]
 echoCommon = "1.0"
-kotlin = "2.0.21" # Changed from "2.2.10"
+kotlin = "2.2.0" # Changed from "2.0.21" or "2.2.10"
 agp = "8.12.1"
 gradleShadow = "9.0.2"
 identityJvm = "202411.1"
