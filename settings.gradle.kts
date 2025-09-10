@@ -5,8 +5,6 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
-
-@Suppress("UnstableApiUsage")
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
@@ -14,8 +12,6 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-
-val extName: String by settings
-rootProject.name = extName
+rootProject.name = "DAB Music Player Extension"
 include(":app")
 include(":ext")
