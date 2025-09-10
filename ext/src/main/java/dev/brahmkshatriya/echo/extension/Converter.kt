@@ -1,6 +1,5 @@
 package dev.brahmkshatriya.echo.extension
 
-import android.util.Log
 import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
@@ -8,6 +7,7 @@ import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
+import dev.brahmkshatriya.echo.common.models.Lyrics
 import dev.brahmkshatriya.echo.extension.models.DabPlaylist
 import dev.brahmkshatriya.echo.extension.models.DabTrack
 import dev.brahmkshatriya.echo.extension.models.DabUser
@@ -72,10 +72,8 @@ class Converter {
         val artist = Artist(
             id = track.artistId?.toString() ?: track.artist,
             name = track.artist,
-            // Add artist image if available; use nullable api reference safely
-            cover = runCatching {
-                api?.getArtistImage(track.artistId?.toString() ?: track.artist)?.toImageHolder()
-            }.getOrNull()
+            // Prefer album cover as a fallback for artist image to avoid API call here
+            cover = track.albumCover?.toImageHolder()
         )
 
         // Create album with cover for info tab
@@ -130,5 +128,13 @@ class Converter {
             name = artist.name,
             cover = artist.picture?.toImageHolder()
         )
+    }
+
+    // Convert a raw lyrics string (plain or LRC) into the Echo Lyrics.Lyric model
+    fun toLyricFromText(text: String?): Lyrics.Lyric? {
+        if (text == null) return null
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return null
+        return Lyrics.Lyric.fromText(trimmed)
     }
 }

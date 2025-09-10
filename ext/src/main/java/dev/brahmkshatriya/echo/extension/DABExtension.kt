@@ -6,6 +6,13 @@ import dev.brahmkshatriya.echo.common.clients.LoginClient
 import dev.brahmkshatriya.echo.common.clients.PlaylistClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
+import dev.brahmkshatriya.echo.common.clients.AlbumClient
+import dev.brahmkshatriya.echo.common.clients.ArtistClient
+import dev.brahmkshatriya.echo.common.clients.LyricsClient
+import dev.brahmkshatriya.echo.common.clients.LikeClient
+import dev.brahmkshatriya.echo.common.clients.PlaylistEditClient
+import dev.brahmkshatriya.echo.common.clients.PlaylistEditCoverClient
+import dev.brahmkshatriya.echo.common.clients.RadioClient
 import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.helpers.ClientException
 import dev.brahmkshatriya.echo.common.models.Feed
@@ -22,14 +29,14 @@ import okhttp3.OkHttpClient
 import dev.brahmkshatriya.echo.extension.RateLimitInterceptor
 
 class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient, PlaylistClient,
-    TrackClient, SearchFeedClient {
+    TrackClient, SearchFeedClient, AlbumClient, ArtistClient, LyricsClient, LikeClient, PlaylistEditClient, PlaylistEditCoverClient, RadioClient {
 
     private lateinit var settings: Settings
     // Use much shorter base delay to avoid slowing searches; RateLimitInterceptor still does exponential backoff on 429
     private val client by lazy { OkHttpClient.Builder().addInterceptor(RateLimitInterceptor(50)).build() }
     private val converter by lazy { Converter() }
     // Create the API and immediately assign it back to the converter so the converter can fetch images
-    private val api by lazy { DABApi(client, converter, settings).also { converter.api = it } }
+    private val api: DABApi by lazy { DABApi(client, converter, settings).also { converter.api = it } }
     private var currentUser: User? = null
 
     // From ExtensionClient
@@ -189,4 +196,83 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
         return shelves.toFeed()
     }
+
+    // --- AlbumClient ---
+    override suspend fun loadAlbum(album: dev.brahmkshatriya.echo.common.models.Album): dev.brahmkshatriya.echo.common.models.Album {
+        // Try to fetch album details from API
+        val apiAlbum = api.getAlbum(album.id)
+        return apiAlbum ?: album
+    }
+    override suspend fun loadTracks(album: dev.brahmkshatriya.echo.common.models.Album): Feed<Track>? {
+        // Fetch album tracks from API
+        val tracks = api.getAlbumTracks(album.id)
+        return tracks.toFeed()
+    }
+    override suspend fun loadFeed(album: dev.brahmkshatriya.echo.common.models.Album): Feed<Shelf>? {
+        // Show album info and tracks as shelves
+        val albumDetails = api.getAlbum(album.id) ?: album
+        val tracks = api.getAlbumTracks(album.id)
+        val shelves = mutableListOf<Shelf>()
+        shelves.add(Shelf.Item(albumDetails))
+        if (tracks.isNotEmpty()) {
+            shelves.add(Shelf.Lists.Tracks(
+                id = "album_tracks_${album.id}",
+                title = "Tracks",
+                list = tracks,
+                more = null
+            ))
+        }
+        return shelves.toFeed()
+    }
+
+    // --- ArtistClient ---
+    override suspend fun loadArtist(artist: dev.brahmkshatriya.echo.common.models.Artist): dev.brahmkshatriya.echo.common.models.Artist {
+        return artist
+    }
+    override suspend fun loadFeed(artist: dev.brahmkshatriya.echo.common.models.Artist): Feed<Shelf> = emptyList<Shelf>().toFeed()
+
+    // --- LyricsClient ---
+    override suspend fun loadLyrics(lyrics: dev.brahmkshatriya.echo.common.models.Lyrics): dev.brahmkshatriya.echo.common.models.Lyrics {
+        val lyricsText = lyrics.id.toIntOrNull()?.let { api.getLyrics(it) } ?: ""
+        val lyricObj = if (lyricsText.isNotBlank()) converter.toLyricFromText(lyricsText) else null
+        return dev.brahmkshatriya.echo.common.models.Lyrics(
+            id = lyrics.id,
+            title = lyrics.title,
+            lyrics = lyricObj,
+            extras = emptyMap()
+        )
+    }
+    override suspend fun searchTrackLyrics(clientId: String, track: Track): Feed<dev.brahmkshatriya.echo.common.models.Lyrics> {
+        val lyricsText = track.id.toIntOrNull()?.let { api.getLyrics(it) } ?: ""
+        val lyricObj = if (lyricsText.isNotBlank()) converter.toLyricFromText(lyricsText) else null
+        if (lyricObj == null) return emptyList<dev.brahmkshatriya.echo.common.models.Lyrics>().toFeed()
+        val lyricsObj = dev.brahmkshatriya.echo.common.models.Lyrics(
+            id = track.id,
+            title = track.title,
+            lyrics = lyricObj,
+            extras = emptyMap()
+        )
+        return listOf(lyricsObj).toFeed()
+    }
+
+    // --- LikeClient ---
+    override suspend fun isItemLiked(item: dev.brahmkshatriya.echo.common.models.EchoMediaItem): Boolean = false
+    override suspend fun likeItem(item: dev.brahmkshatriya.echo.common.models.EchoMediaItem, shouldLike: Boolean) {}
+
+    // --- PlaylistEditClient ---
+    override suspend fun addTracksToPlaylist(playlist: Playlist, tracks: List<Track>, index: Int, new: List<Track>) {}
+    override suspend fun removeTracksFromPlaylist(playlist: Playlist, tracks: List<Track>, indexes: List<Int>) {}
+    override suspend fun createPlaylist(title: String, description: String?): Playlist = Playlist(id = "", title = title, authors = emptyList(), isEditable = false, trackCount = 0)
+    override suspend fun deletePlaylist(playlist: Playlist) {}
+    override suspend fun editPlaylistMetadata(playlist: Playlist, title: String, description: String?) {}
+    override suspend fun listEditablePlaylists(track: Track?): List<Pair<Playlist, Boolean>> = emptyList()
+    override suspend fun moveTrackInPlaylist(playlist: Playlist, tracks: List<Track>, fromIndex: Int, toIndex: Int) {}
+
+    // --- PlaylistEditCoverClient ---
+    override suspend fun editPlaylistCover(playlist: Playlist, cover: java.io.File?) {}
+
+    // --- RadioClient ---
+    override suspend fun loadTracks(radio: dev.brahmkshatriya.echo.common.models.Radio): Feed<Track> = emptyList<Track>().toFeed()
+    override suspend fun loadRadio(radio: dev.brahmkshatriya.echo.common.models.Radio): dev.brahmkshatriya.echo.common.models.Radio = radio
+    override suspend fun radio(item: dev.brahmkshatriya.echo.common.models.EchoMediaItem, context: dev.brahmkshatriya.echo.common.models.EchoMediaItem?): dev.brahmkshatriya.echo.common.models.Radio = dev.brahmkshatriya.echo.common.models.Radio(id = "", title = "")
 }
