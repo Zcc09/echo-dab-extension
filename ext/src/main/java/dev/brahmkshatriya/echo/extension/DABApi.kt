@@ -1,169 +1,76 @@
 package dev.brahmkshatriya.echo.extension
 
-import dev.brahmkshatriya.echo.common.helpers.ContinuationCallback.Companion.await
-import dev.brahmkshatriya.echo.common.models.ImageHolder
+import dev.brahmkshatriya.echo.common.helpers.Page
+import dev.brahmkshatriya.echo.common.helpers.PagedData
+import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Track
-import dev.brahmkshatriya.echo.common.settings.Settings
-import java.io.InputStream
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.serialization.ExperimentalSerializationApi
+import dev.brahmkshatriya.echo.common.models.User
+import dev.brahmkshatriya.echo.extension.models.*
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonObjectBuilder
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.decodeFromStream
-import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonObject
-import okhttp3.Cookie
-import okhttp3.CookieJar
-import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
 
-class DABApi {
+class DABApi(private val client: OkHttpClient, private val converter: Converter) {
 
-    private val client: OkHttpClient
-    private lateinit var settings: Settings
-
-    init {
-        val cookieJar = object : CookieJar {
-            override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-                if (url.toString().contains("login")) {
-                    val sessionCookie = cookies.firstOrNull { it.name == "session" }
-                    if (sessionCookie != null) {
-                        settings.putString("session_cookie", sessionCookie.value)
-                    }
-                }
-            }
-
-            override fun loadForRequest(url: HttpUrl): List<Cookie> {
-                val sessionCookie = settings.getString("session_cookie")
-                return if (sessionCookie != null) {
-                    listOf(Cookie.parse(url, "session=$sessionCookie")!!)
-                } else {
-                    emptyList()
-                }
-            }
-        }
-        client = OkHttpClient.Builder().cookieJar(cookieJar).build()
+    private val json = Json {
+        ignoreUnknownKeys = true
+        coerceInputValues = true
     }
 
-    fun setSettings(settings: Settings) {
-        this.settings = settings
+    private inline fun <reified T> execute(request: Request): T {
+        val response = client.newCall(request).execute()
+        val body = response.body?.string() ?: error("Empty response body")
+        if (!response.isSuccessful) {
+            error("API Error: ${response.code} - $body")
+        }
+        return json.decodeFromString(body)
     }
 
-    companion object {
-        private val json = Json {
-            ignoreUnknownKeys = true
-            isLenient = true
-        }
-        private const val BASE_URL = "https://dab.yeet.su/api"
-        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+    fun login(email: String, pass: String): String {
+        val formBody = FormBody.Builder()
+            .add("email", email)
+            .add("password", pass)
+            .build()
+        val request = Request.Builder()
+            .url("https://dab.yeet.su/api/auth/login")
+            .post(formBody)
+            .build()
+        val response: DabAuthResponse = execute(request)
+        return response.token
     }
 
-    class DABApiException(val code: Int, message: String) : Exception("API Error $code: $message")
+    fun getMe(token: String): User {
+        val request = Request.Builder()
+            .url("https://dab.yeet.su/api/me")
+            .header("Authorization", "Bearer $token")
+            .build()
+        val response: DabUserResponse = execute(request)
+        return converter.toUser(response.data)
+    }
 
-    private suspend fun call(
-        path: String,
-        method: String = "GET",
-        queryParams: Map<String, String>? = null,
-        bodyBuilder: (JsonObjectBuilder.() -> Unit)? = null
-    ): JsonObject = withContext(Dispatchers.IO) {
-
-        val urlBuilder = BASE_URL.toHttpUrl().newBuilder()
-            .addPathSegments(path.trimStart('/'))
-
-        queryParams?.forEach { (key, value) ->
-            urlBuilder.addQueryParameter(key, value)
-        }
-
-        val requestBody: RequestBody? = bodyBuilder?.let {
-            json.encodeToString(JsonObject.serializer(), buildJsonObject(it)).toRequestBody(JSON_MEDIA_TYPE)
-        }
-
-        val requestBuilder = Request.Builder()
-            .url(urlBuilder.build())
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Accept", "application/json")
-
-        when (method.uppercase()) {
-            "GET" -> requestBuilder.get()
-            "POST" -> requestBuilder.post(requestBody ?: "".toRequestBody(null))
-            "DELETE" -> requestBuilder.delete()
-            else -> throw IllegalArgumentException("Unsupported HTTP method: $method")
-        }
-
-        client.newCall(requestBuilder.build()).await().use { response ->
-            if (response.body?.contentLength() == 0L) {
-                if (response.isSuccessful) return@use JsonObject(emptyMap())
-                else throw DABApiException(response.code, "API call failed with empty body")
-            }
-
-            val result = response.body!!.source().use { decodeJsonStream(it.inputStream()) }
-
-            if (!response.isSuccessful) {
-                val errorMessage = result["message"]?.toString() ?: "Unknown API error"
-                throw DABApiException(response.code, errorMessage)
-            }
-            return@withContext result
+    fun getLibraryPlaylists(token: String, page: Int, pageSize: Int): PagedData<Playlist> {
+        return PagedData.Continuous { continuation ->
+            val pageNum = continuation?.toIntOrNull() ?: page
+            val url = "https://dab.yeet.su/api/me/library/playlists?limit=$pageSize&offset=${(pageNum - 1) * pageSize}"
+            val request = Request.Builder()
+                .url(url)
+                .header("Authorization", "Bearer $token")
+                .build()
+            val response: DabPlaylistResponse = execute(request)
+            val playlists = response.data.map(converter::toPlaylist)
+            Page(playlists, if (response.meta.hasMore) (pageNum + 1).toString() else null)
         }
     }
 
-    suspend fun login(email: String, pass: String) = call(
-        path = "/auth/login",
-        method = "POST"
-    ) {
-        put("email", email)
-        put("password", pass)
-    }
-
-    suspend fun me() = call(path = "/auth/me")
-
-    suspend fun search(query: String, type: String) =
-        call("/search", queryParams = mapOf("q" to query, "type" to type))
-
-    suspend fun getAlbum(id: String) = call("/album/$id")
-    suspend fun getDiscography(id: String) = call("/discography", queryParams = mapOf("artistId" to id))
-    suspend fun getLibraries() = call("/libraries")
-    suspend fun getLibrary(id: String, page: Int = 1) =
-        call("/libraries/$id", queryParams = mapOf("page" to page.toString()))
-
-    suspend fun getStreamUrl(id: String) = call("/stream", queryParams = mapOf("trackId" to id))
-    suspend fun getLyrics(artist: String, title: String) =
-        call("/lyrics", queryParams = mapOf("artist" to artist, "title" to title))
-
-    suspend fun getFavorites() = call(path = "/favorites")
-
-    suspend fun addToFavorites(track: Track) = call(
-        path = "/favorites",
-        method = "POST"
-    ) {
-        putJsonObject("track") {
-            put("id", track.id)
-            put("title", track.title)
-            put("artist", track.artists.firstOrNull()?.name)
-            put("artistId", track.artists.firstOrNull()?.id)
-            put("albumTitle", track.album?.title)
-            put("albumCover", (track.album?.cover as? ImageHolder.NetworkRequestImageHolder)?.request?.url)
-            put("albumId", track.album?.id)
-            put("duration", track.duration?.div(1000))
+    fun getPlaylistTracks(playlist: Playlist, page: Int, pageSize: Int): PagedData<Track> {
+        return PagedData.Continuous { continuation ->
+            val pageNum = continuation?.toIntOrNull() ?: page
+            val url = "https://dab.yeet.su/api${playlist.id}/tracks?limit=$pageSize&offset=${(pageNum - 1) * pageSize}"
+            val request = Request.Builder().url(url).build()
+            val response: DabTrackResponse = execute(request)
+            val tracks = response.data.map(converter::toTrack)
+            Page(tracks, if (response.meta.hasMore) (pageNum + 1).toString() else null)
         }
-    }
-
-    suspend fun removeFromFavorites(trackId: String) = call(
-        path = "/favorites",
-        method = "DELETE",
-        queryParams = mapOf("trackId" to trackId)
-    )
-
-    @OptIn(ExperimentalSerializationApi::class)
-    private suspend fun decodeJsonStream(stream: InputStream): JsonObject = withContext(Dispatchers.Default) {
-        json.decodeFromStream(stream)
     }
 }
-

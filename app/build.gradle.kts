@@ -4,7 +4,10 @@ plugins {
 }
 
 dependencies {
-    implementation(project(":ext"))
+    implementation(project(":ext")) {
+        // Exclude all kotlin stdlib variations from the packaged APK
+        exclude(group = "org.jetbrains.kotlin")
+    }
     compileOnly(libs.echo.common)
     compileOnly(libs.kotlin.stdlib)
 }
