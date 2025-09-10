@@ -15,35 +15,47 @@ class Converter {
     fun toUser(user: DabUser): User {
         return User(
             id = user.id,
-            name = user.attributes.name,
-            cover = user.attributes.artwork?.toImageHolder()
+            name = user.username,
+            // The /auth/me endpoint doesn't seem to provide an avatar.
+            cover = null
         )
     }
 
     fun toPlaylist(playlist: DabPlaylist): Playlist {
         return Playlist(
-            id = playlist.href,
-            title = playlist.attributes.name,
-            cover = playlist.attributes.artwork.toImageHolder(),
-            authors = listOfNotNull(playlist.attributes.curatorName).map { Artist(it, it) },
+            id = playlist.id,
+            title = playlist.name,
+            // The API for playlists doesn't provide a cover image.
+            cover = null,
+            authors = listOf(Artist(id = "user", name = "You")),
             isEditable = false,
+            trackCount = playlist.trackCount.toLong()
         )
     }
 
     fun toTrack(track: DabTrack): Track {
+        // Construct the streamable URL from the track ID as per the API docs.
+        val streamUrl = "https://dab.yeet.su/api/stream?trackId=${track.id}"
         return Track(
             id = track.id,
-            title = track.attributes.name,
-            cover = track.attributes.artwork.toImageHolder(),
-            artists = listOf(Artist(id = track.attributes.artistName, name = track.attributes.artistName)),
-            album = track.attributes.albumName?.let { Album(id = it, title = it) },
+            title = track.title,
+            cover = track.albumCover?.toImageHolder(),
+            artists = listOf(Artist(id = track.artistId ?: track.artist, name = track.artist)),
+            album = track.albumTitle?.let {
+                Album(
+                    id = track.albumId ?: it,
+                    title = it
+                )
+            },
             streamables = listOf(
                 Streamable.server(
                     id = "stream",
                     quality = 0,
-                    extras = mapOf("url" to track.attributes.url)
+                    extras = mapOf("url" to streamUrl)
                 )
-            )
+            ),
+            duration = track.duration.toLong() * 1000 // Assuming duration is in seconds
         )
     }
 }
+
