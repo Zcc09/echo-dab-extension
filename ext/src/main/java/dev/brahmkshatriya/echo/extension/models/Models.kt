@@ -80,3 +80,31 @@ data class DabStreamResponse(
     val stream: String? = null,
     val link: String? = null
 )
+
+@Serializable
+data class DabAlbumResponse(
+    val albums: List<DabAlbum>
+)
+
+@Serializable
+data class DabAlbum(
+    val id: String,
+    val title: String,
+    val artist: String,
+    val artistId: Int?,
+    val cover: String?,
+    val releaseDate: String?,
+    val trackCount: Int
+)
+
+@Serializable
+data class DabArtistResponse(
+    val artists: List<DabArtist>
+)
+
+@Serializable
+data class DabArtist(
+    val id: Int,
+    val name: String,
+    val picture: String?
+)

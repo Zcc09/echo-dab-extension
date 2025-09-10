@@ -1,6 +1,5 @@
 package dev.brahmkshatriya.echo.extension
 
-import android.util.Log
 import dev.brahmkshatriya.echo.common.helpers.Page
 import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.models.Playlist
@@ -42,12 +41,10 @@ class DABApi(
             val sessionCookie = cookieHeader.split(';').firstOrNull { it.trim().startsWith("session=") }
             if (sessionCookie != null) {
                 settings.putString("session_cookie", sessionCookie)
-                Log.d("DAB_DEBUG", "Session cookie saved successfully.")
             }
         }
 
         val body = response.body?.string() ?: error("Empty response body")
-        Log.d("DAB_API", "Response for ${request.url}: $body")
         if (!response.isSuccessful) {
             error("API Error: ${response.code} ${response.message} - $body")
         }
@@ -67,8 +64,6 @@ class DABApi(
         val response = httpClient.newCall(request).execute()
         val body = response.body?.string() ?: error("Empty response body")
 
-        Log.d("DAB_API", "Response for ${request.url}: $body")
-
         if (!response.isSuccessful) {
             error("API Error: ${response.code} ${response.message} - $body")
         }
@@ -82,13 +77,12 @@ class DABApi(
 
     fun getStreamUrl(trackId: String): String {
         val sessionCookie = settings.getString("session_cookie")
-            ?: error("Not logged in: session cookie not found.")
-
         val url = "https://dab.yeet.su/api/stream?trackId=$trackId"
-        val request = Request.Builder()
-            .url(url)
-            .header("Cookie", sessionCookie)
-            .build()
+        val requestBuilder = Request.Builder().url(url)
+        if (sessionCookie != null) {
+            requestBuilder.header("Cookie", sessionCookie)
+        }
+        val request = requestBuilder.build()
 
         val response = httpClient.newCall(request).execute()
 
@@ -100,13 +94,11 @@ class DABApi(
         // Check if response is a redirect (302) with Location header
         val location = response.header("Location")
         if (location != null) {
-            Log.d("DAB_API", "Stream redirect for track $trackId: $location")
             return location
         }
 
         // Read the body only after checking for redirects
         val body = response.body?.string() ?: error("Empty response body")
-        Log.d("DAB_API", "Stream response for track $trackId: $body")
 
         return try {
             val streamResponse: DabStreamResponse = json.decodeFromString(body)
@@ -117,7 +109,6 @@ class DABApi(
             if (body.trim().startsWith("http")) {
                 body.trim()
             } else {
-                Log.e("DAB_API", "Failed to parse stream response: $body", e)
                 error("API did not return a stream URL.")
             }
         }
@@ -148,18 +139,98 @@ class DABApi(
     fun search(query: String, page: Int, pageSize: Int): PagedData<Track> {
         return PagedData.Continuous { continuation ->
             val pageNum = continuation?.toIntOrNull() ?: page
-            val url =
-                "https://dab.yeet.su/api/search?q=$query&limit=$pageSize&offset=${(pageNum - 1) * pageSize}"
-            val request = Request.Builder().url(url).build()
+            val url = "https://dab.yeet.su/api/search?q=$query&limit=$pageSize&offset=${(pageNum - 1) * pageSize}"
+
+            val request = Request.Builder()
+                .url(url)
+                .build()
+
             val response = httpClient.newCall(request).execute()
             val body = response.body?.string() ?: error("Empty response body")
-            Log.d("DAB_API", "Response for ${request.url}: $body")
+
             if (!response.isSuccessful) {
                 error("API Error: ${response.code} ${response.message} - $body")
             }
+
             val trackResponse: DabTrackResponse = json.decodeFromString(body)
             val tracks = trackResponse.tracks.map(converter::toTrack)
             Page(tracks, if (tracks.isNotEmpty()) (pageNum + 1).toString() else null)
+        }
+    }
+
+    fun searchAlbums(query: String, limit: Int = 5): List<dev.brahmkshatriya.echo.common.models.Album> {
+        val url = "https://dab.yeet.su/api/search/albums?q=$query&limit=$limit&offset=0"
+        val request = Request.Builder().url(url).build()
+        val response = httpClient.newCall(request).execute()
+
+        if (!response.isSuccessful) {
+            return emptyList()
+        }
+
+        val body = response.body?.string() ?: return emptyList()
+
+        return try {
+            val albumResponse: DabAlbumResponse = json.decodeFromString(body)
+            albumResponse.albums.map(converter::toAlbum)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun searchArtists(query: String, limit: Int = 5): List<dev.brahmkshatriya.echo.common.models.Artist> {
+        val url = "https://dab.yeet.su/api/search/artists?q=$query&limit=$limit&offset=0"
+        val request = Request.Builder().url(url).build()
+        val response = httpClient.newCall(request).execute()
+
+        if (!response.isSuccessful) {
+            return emptyList()
+        }
+
+        val body = response.body?.string() ?: return emptyList()
+
+        return try {
+            val artistResponse: DabArtistResponse = json.decodeFromString(body)
+            artistResponse.artists.map(converter::toArtist)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun searchTracks(query: String, limit: Int = 5): List<Track> {
+        val url = "https://dab.yeet.su/api/search?q=$query&limit=$limit&offset=0"
+        val request = Request.Builder().url(url).build()
+        val response = httpClient.newCall(request).execute()
+
+        if (!response.isSuccessful) {
+            return emptyList()
+        }
+
+        val body = response.body?.string() ?: return emptyList()
+
+        return try {
+            val trackResponse: DabTrackResponse = json.decodeFromString(body)
+            trackResponse.tracks.map(converter::toTrack)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    fun getArtistImage(artistId: String): String? {
+        val url = "https://dab.yeet.su/api/artists/$artistId"
+        val request = Request.Builder().url(url).build()
+        val response = httpClient.newCall(request).execute()
+
+        if (!response.isSuccessful) {
+            return null
+        }
+
+        val body = response.body?.string() ?: return null
+
+        return try {
+            val artistResponse: DabArtistResponse = json.decodeFromString(body)
+            artistResponse.artists.firstOrNull()?.picture
+        } catch (e: Exception) {
+            null
         }
     }
 }

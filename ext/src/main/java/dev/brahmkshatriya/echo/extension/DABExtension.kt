@@ -25,9 +25,11 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     TrackClient, SearchFeedClient {
 
     private lateinit var settings: Settings
-    private val client by lazy { OkHttpClient.Builder().addInterceptor(RateLimitInterceptor(500)).build() }
+    // Use much shorter base delay to avoid slowing searches; RateLimitInterceptor still does exponential backoff on 429
+    private val client by lazy { OkHttpClient.Builder().addInterceptor(RateLimitInterceptor(50)).build() }
     private val converter by lazy { Converter() }
-    private val api by lazy { DABApi(client, converter, settings) }
+    // Create the API and immediately assign it back to the converter so the converter can fetch images
+    private val api by lazy { DABApi(client, converter, settings).also { converter.api = it } }
     private var currentUser: User? = null
 
     // From ExtensionClient
@@ -99,7 +101,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         return currentUser
     }
 
-    // From LibraryFeedClient
+    // From LibraryFeedClient - Simplified implementation
     override suspend fun loadLibraryFeed(): Feed<Shelf> {
         if (getCurrentUser() == null) throw ClientException.LoginRequired()
 
@@ -146,18 +148,45 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         return null
     }
 
-    // From SearchFeedClient
+    // From SearchFeedClient - Simple but effective search implementation
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
         if (query.isBlank()) {
             return emptyList<Shelf>().toFeed()
         }
-        val allTracks = api.search(query, 1, 50).loadAll()
-        val shelf = Shelf.Lists.Tracks(
-            id = "search_results",
-            title = "Search Results for \"$query\"",
-            list = allTracks,
-            more = null
-        )
-        return listOf(shelf).toFeed()
+
+        val shelves = mutableListOf<Shelf>()
+
+        // Get all content types with error handling
+        val tracks = runCatching { api.searchTracks(query, 8) }.getOrElse { emptyList<Track>() }
+        val albums = runCatching { api.searchAlbums(query, 4) }.getOrElse { emptyList() }
+        val artists = runCatching { api.searchArtists(query, 4) }.getOrElse { emptyList() }
+
+        // Add tracks shelf if there are results
+        if (tracks.isNotEmpty()) {
+            shelves.add(
+                Shelf.Lists.Tracks(
+                    id = "search_tracks",
+                    title = "🎵 Tracks",
+                    list = tracks,
+                    more = null
+                )
+            )
+        }
+
+        // Add album items directly as individual shelves
+        if (albums.isNotEmpty()) {
+            albums.forEach { album ->
+                shelves.add(Shelf.Item(album))
+            }
+        }
+
+        // Add artist items directly as individual shelves
+        if (artists.isNotEmpty()) {
+            artists.forEach { artist ->
+                shelves.add(Shelf.Item(artist))
+            }
+        }
+
+        return shelves.toFeed()
     }
 }
