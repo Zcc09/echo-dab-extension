@@ -14,7 +14,7 @@ import dev.brahmkshatriya.echo.extension.models.DabUser
 class Converter {
     fun toUser(user: DabUser): User {
         return User(
-            id = user.id,
+            id = user.id.toString(),
             name = user.username,
             // The /auth/me endpoint doesn't seem to provide an avatar.
             cover = null
@@ -58,4 +58,3 @@ class Converter {
         )
     }
 }
-

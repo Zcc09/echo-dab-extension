@@ -10,10 +10,9 @@ data class DabUserResponse(val user: DabUser?)
 
 @Serializable
 data class DabUser(
-    val id: String,
+    val id: Int,
     val username: String,
-    val email: String,
-    val created_at: String
+    val email: String
 )
 
 @Serializable

@@ -4,8 +4,10 @@ import dev.brahmkshatriya.echo.common.clients.ExtensionClient
 import dev.brahmkshatriya.echo.common.clients.LibraryFeedClient
 import dev.brahmkshatriya.echo.common.clients.LoginClient
 import dev.brahmkshatriya.echo.common.clients.PlaylistClient
+import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
 import dev.brahmkshatriya.echo.common.helpers.PagedData
+import dev.brahmkshatriya.echo.common.helpers.ClientException
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.Playlist
@@ -19,12 +21,13 @@ import dev.brahmkshatriya.echo.common.settings.Settings
 import okhttp3.OkHttpClient
 
 class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient, PlaylistClient,
-    TrackClient {
+    TrackClient, SearchFeedClient {
 
     private lateinit var settings: Settings
     private val client by lazy { OkHttpClient() }
     private val converter by lazy { Converter() }
     private val api by lazy { DABApi(client, converter, settings) }
+    private var currentUser: User? = null
 
     // From ExtensionClient
     override fun setSettings(settings: Settings) {
@@ -36,7 +39,16 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     }
 
     override suspend fun onInitialize() {
-        // Code to run once when the extension is first loaded.
+        // When the extension starts, check if there's a saved user session.
+        val sessionCookie = settings.getString("session_cookie")
+        if (sessionCookie != null && currentUser == null) {
+            // If so, fetch the user's data to validate the session.
+            currentUser = runCatching { api.getMe() }.getOrNull()
+            if (currentUser == null) {
+                // If fetching fails (e.g., expired session), clear the cookie.
+                settings.putString("session_cookie", null)
+            }
+        }
     }
 
     override suspend fun onExtensionSelected() {
@@ -70,34 +82,38 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     override suspend fun onLogin(key: String, data: Map<String, String?>): List<User> {
         val email = data["email"] ?: error("Email is required")
         val password = data["password"] ?: error("Password is required")
-        val user = api.login(email, password)
+        val user = api.loginAndSaveCookie(email, password)
+        currentUser = user
         return listOf(user)
     }
 
     // From LoginClient
     override fun setLoginUser(user: User?) {
+        // This is called by Echo to log out the user.
         if (user == null) {
-            settings.putString("token", null)
-            // Here you would also clear any cookies if your API used them for sessions.
+            settings.putString("session_cookie", null)
+            currentUser = null
         }
     }
 
     override suspend fun getCurrentUser(): User? {
-        return if (settings.getString("token") != null) {
-            runCatching { api.getMe() }.getOrNull()
-        } else {
-            null
+        if (currentUser == null) {
+            onInitialize()
         }
+        return currentUser
     }
 
     // From LibraryFeedClient
     override suspend fun loadLibraryFeed(): Feed<Shelf> {
-        val playlists = api.getLibraryPlaylists(1, 50).loadAll()
-        val shelf = Shelf.Lists.Items(
+        // First, check if a user is logged in.
+        if (getCurrentUser() == null) throw ClientException.LoginRequired()
+
+        // Fetch the playlists one page at a time.
+        val playlists = api.getLibraryPlaylists(1, 50)
+        val shelf = Shelf.Lists.PagedItems(
             id = "library_playlists",
             title = "My Playlists",
-            list = playlists,
-            more = null
+            data = playlists
         )
         return listOf(shelf).toFeed()
     }
@@ -133,5 +149,19 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     override suspend fun loadFeed(track: Track): Feed<Shelf>? {
         return null
     }
-}
 
+    // From SearchFeedClient
+    override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
+        if (query.isBlank()) {
+            return emptyList<Shelf>().toFeed()
+        }
+        val allTracks = api.search(query, 1, 50).loadAll()
+        val shelf = Shelf.Lists.Tracks(
+            id = "search_results",
+            title = "Search Results for \"$query\"",
+            list = allTracks,
+            more = null
+        )
+        return listOf(shelf).toFeed()
+    }
+}
