@@ -7,10 +7,7 @@ import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.settings.Settings
-import dev.brahmkshatriya.echo.extension.models.DabLoginRequest
-import dev.brahmkshatriya.echo.extension.models.DabPlaylistResponse
-import dev.brahmkshatriya.echo.extension.models.DabTrackResponse
-import dev.brahmkshatriya.echo.extension.models.DabUserResponse
+import dev.brahmkshatriya.echo.extension.models.*
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -28,10 +25,6 @@ class DABApi(
         coerceInputValues = true
     }
 
-    // No CookieJar. We will handle cookies manually.
-    private val client = httpClient
-
-    // Special function for login to find and save the session cookie.
     fun loginAndSaveCookie(email: String, pass: String): User {
         val loginRequest = DabLoginRequest(email, pass)
         val requestBody = json.encodeToString(DabLoginRequest.serializer(), loginRequest)
@@ -42,15 +35,12 @@ class DABApi(
             .post(requestBody)
             .build()
 
-        val response = client.newCall(request).execute()
+        val response = httpClient.newCall(request).execute()
 
-        // Manually find the 'Set-Cookie' header from the login response.
         val cookieHeader = response.headers["Set-Cookie"]
         if (cookieHeader != null) {
-            // Extract the 'session=...' part of the header.
             val sessionCookie = cookieHeader.split(';').firstOrNull { it.trim().startsWith("session=") }
             if (sessionCookie != null) {
-                // Save the cookie to settings for future requests.
                 settings.putString("session_cookie", sessionCookie)
                 Log.d("DAB_DEBUG", "Session cookie saved successfully.")
             }
@@ -65,19 +55,16 @@ class DABApi(
         return converter.toUser(userResponse.user ?: error("User data is null after login"))
     }
 
-    // A new executor for all authenticated requests.
     private inline fun <reified T> executeAuthenticated(url: String): T {
-        // Retrieve the saved cookie from settings.
         val sessionCookie = settings.getString("session_cookie")
             ?: error("Not logged in: session cookie not found.")
 
-        // Build the request and manually add the Cookie header.
         val request = Request.Builder()
             .url(url)
             .header("Cookie", sessionCookie)
             .build()
 
-        val response = client.newCall(request).execute()
+        val response = httpClient.newCall(request).execute()
         val body = response.body?.string() ?: error("Empty response body")
 
         Log.d("DAB_API", "Response for ${request.url}: $body")
@@ -88,10 +75,52 @@ class DABApi(
         return json.decodeFromString(body)
     }
 
-
     fun getMe(): User {
         val response: DabUserResponse = executeAuthenticated("https://dab.yeet.su/api/auth/me")
         return converter.toUser(response.user ?: error("User data is null"))
+    }
+
+    fun getStreamUrl(trackId: String): String {
+        val sessionCookie = settings.getString("session_cookie")
+            ?: error("Not logged in: session cookie not found.")
+
+        val url = "https://dab.yeet.su/api/stream?trackId=$trackId"
+        val request = Request.Builder()
+            .url(url)
+            .header("Cookie", sessionCookie)
+            .build()
+
+        val response = httpClient.newCall(request).execute()
+
+        if (!response.isSuccessful) {
+            val errorBody = response.body?.string() ?: "Empty response"
+            error("API Error: ${response.code} - $errorBody")
+        }
+
+        // Check if response is a redirect (302) with Location header
+        val location = response.header("Location")
+        if (location != null) {
+            Log.d("DAB_API", "Stream redirect for track $trackId: $location")
+            return location
+        }
+
+        // Read the body only after checking for redirects
+        val body = response.body?.string() ?: error("Empty response body")
+        Log.d("DAB_API", "Stream response for track $trackId: $body")
+
+        return try {
+            val streamResponse: DabStreamResponse = json.decodeFromString(body)
+            streamResponse.streamUrl ?: streamResponse.url ?: streamResponse.stream ?: streamResponse.link
+            ?: error("No stream URL found in JSON response")
+        } catch (e: kotlinx.serialization.SerializationException) {
+            // If JSON parsing fails, check if response is a direct URL
+            if (body.trim().startsWith("http")) {
+                body.trim()
+            } else {
+                Log.e("DAB_API", "Failed to parse stream response: $body", e)
+                error("API did not return a stream URL.")
+            }
+        }
     }
 
     fun getLibraryPlaylists(page: Int, pageSize: Int): PagedData<Playlist> {
@@ -108,11 +137,11 @@ class DABApi(
     fun getPlaylistTracks(playlist: Playlist, page: Int, pageSize: Int): PagedData<Track> {
         return PagedData.Continuous { continuation ->
             val pageNum = continuation?.toIntOrNull() ?: page
-            val url =
-                "https://dab.yeet.su/api/libraries/${playlist.id}/tracks?limit=$pageSize&offset=${(pageNum - 1) * pageSize}"
-            val response: DabTrackResponse = executeAuthenticated(url)
-            val tracks = response.tracks.map(converter::toTrack)
-            Page(tracks, if (tracks.isNotEmpty()) (pageNum + 1).toString() else null)
+            val url = "https://dab.yeet.su/api/libraries/${playlist.id}?limit=$pageSize&offset=${(pageNum - 1) * pageSize}"
+            val response: DabLibraryTracksResponse = executeAuthenticated(url)
+            val tracks = response.library.tracks.map(converter::toTrack)
+            val nextContinuation = if (response.library.pagination.hasMore) (pageNum + 1).toString() else null
+            Page(tracks, nextContinuation)
         }
     }
 
@@ -121,9 +150,8 @@ class DABApi(
             val pageNum = continuation?.toIntOrNull() ?: page
             val url =
                 "https://dab.yeet.su/api/search?q=$query&limit=$pageSize&offset=${(pageNum - 1) * pageSize}"
-            // Search does not require authentication
             val request = Request.Builder().url(url).build()
-            val response = client.newCall(request).execute()
+            val response = httpClient.newCall(request).execute()
             val body = response.body?.string() ?: error("Empty response body")
             Log.d("DAB_API", "Response for ${request.url}: $body")
             if (!response.isSuccessful) {

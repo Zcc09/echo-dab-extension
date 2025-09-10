@@ -19,12 +19,13 @@ import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.Settings
 import okhttp3.OkHttpClient
+import dev.brahmkshatriya.echo.extension.RateLimitInterceptor
 
 class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient, PlaylistClient,
     TrackClient, SearchFeedClient {
 
     private lateinit var settings: Settings
-    private val client by lazy { OkHttpClient() }
+    private val client by lazy { OkHttpClient.Builder().addInterceptor(RateLimitInterceptor(500)).build() }
     private val converter by lazy { Converter() }
     private val api by lazy { DABApi(client, converter, settings) }
     private var currentUser: User? = null
@@ -39,20 +40,16 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     }
 
     override suspend fun onInitialize() {
-        // When the extension starts, check if there's a saved user session.
         val sessionCookie = settings.getString("session_cookie")
         if (sessionCookie != null && currentUser == null) {
-            // If so, fetch the user's data to validate the session.
             currentUser = runCatching { api.getMe() }.getOrNull()
             if (currentUser == null) {
-                // If fetching fails (e.g., expired session), clear the cookie.
                 settings.putString("session_cookie", null)
             }
         }
     }
 
     override suspend fun onExtensionSelected() {
-        // Code to run when the user selects this extension in the app.
     }
 
     // From LoginClient.CustomInput
@@ -89,7 +86,6 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
     // From LoginClient
     override fun setLoginUser(user: User?) {
-        // This is called by Echo to log out the user.
         if (user == null) {
             settings.putString("session_cookie", null)
             currentUser = null
@@ -105,23 +101,19 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
     // From LibraryFeedClient
     override suspend fun loadLibraryFeed(): Feed<Shelf> {
-        // First, check if a user is logged in.
         if (getCurrentUser() == null) throw ClientException.LoginRequired()
 
-        // Fetch the playlists one page at a time.
-        val playlists = api.getLibraryPlaylists(1, 50)
-        val shelf = Shelf.Lists.PagedItems(
-            id = "library_playlists",
-            title = "My Playlists",
-            data = playlists
-        )
-        return listOf(shelf).toFeed()
+        val playlists: PagedData<Playlist> = api.getLibraryPlaylists(1, 50)
+
+        val playlistsAsShelves = playlists.map { result ->
+            result.getOrThrow().map { playlist -> Shelf.Item(playlist) }
+        } as PagedData<Shelf>
+
+        return playlistsAsShelves.toFeed()
     }
 
-    // From PlaylistClient
     override suspend fun loadPlaylist(playlist: Playlist): Playlist {
-        val tracks = api.getPlaylistTracks(playlist, 1, 200).loadAll()
-        return playlist.copy(trackCount = tracks.size.toLong())
+        return playlist
     }
 
     override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
@@ -142,8 +134,12 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         streamable: Streamable,
         isDownload: Boolean
     ): Streamable.Media {
-        val url = streamable.extras["url"] ?: error("Streamable URL not found")
-        return url.toServerMedia()
+        // Extract the track ID from the stream URL
+        val trackId = streamable.extras["url"]?.substringAfter("trackId=") ?: error("Track ID not found in URL")
+
+        val streamUrl = api.getStreamUrl(trackId)
+
+        return streamUrl.toServerMedia()
     }
 
     override suspend fun loadFeed(track: Track): Feed<Shelf>? {

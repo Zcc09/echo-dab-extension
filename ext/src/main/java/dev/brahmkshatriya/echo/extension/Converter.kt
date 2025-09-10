@@ -34,13 +34,13 @@ class Converter {
     }
 
     fun toTrack(track: DabTrack): Track {
-        // Construct the streamable URL from the track ID as per the API docs.
         val streamUrl = "https://dab.yeet.su/api/stream?trackId=${track.id}"
+
         return Track(
-            id = track.id,
+            id = track.id.toString(),
             title = track.title,
             cover = track.albumCover?.toImageHolder(),
-            artists = listOf(Artist(id = track.artistId ?: track.artist, name = track.artist)),
+            artists = listOf(Artist(id = track.artistId?.toString() ?: track.artist, name = track.artist)),
             album = track.albumTitle?.let {
                 Album(
                     id = track.albumId ?: it,
@@ -51,10 +51,12 @@ class Converter {
                 Streamable.server(
                     id = "stream",
                     quality = 0,
-                    extras = mapOf("url" to streamUrl)
+                    extras = mapOf(
+                        "url" to streamUrl
+                    )
                 )
             ),
-            duration = track.duration.toLong() * 1000 // Assuming duration is in seconds
+            duration = track.duration.toLong() * 1000
         )
     }
 }
