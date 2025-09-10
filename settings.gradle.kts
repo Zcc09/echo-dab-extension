@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 rootProject.name = "DAB Music Player Extension"
 include(":app")
 include(":ext")
+

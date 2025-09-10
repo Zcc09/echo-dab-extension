@@ -1,114 +1,136 @@
 package dev.brahmkshatriya.echo.extension
 
-import android.content.Context
-import dev.brahmkshatriya.echo.common.Extension
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
 import dev.brahmkshatriya.echo.common.clients.LibraryFeedClient
 import dev.brahmkshatriya.echo.common.clients.LoginClient
 import dev.brahmkshatriya.echo.common.clients.PlaylistClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
-import dev.brahmkshatriya.echo.common.models.EchoMediaItem
+import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.models.Feed
+import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Streamable
+import dev.brahmkshatriya.echo.common.models.Streamable.Media.Companion.toServerMedia
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
-import dev.brahmkshatriya.echo.common.providers.SettingsProvider
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.SettingTextInput
 import dev.brahmkshatriya.echo.common.settings.Settings
 import okhttp3.OkHttpClient
 
-class DABExtension(context: Context) : Extension(context) {
+/**
+ * This is the main implementation of your extension.
+ * It implements all the necessary `Client` interfaces to provide functionality to the Echo app.
+ */
+class DABExtension : ExtensionClient, LoginClient, LibraryFeedClient, PlaylistClient, TrackClient {
 
-    override val name = "DAB Music"
-    override val id = "dab"
+    private lateinit var settings: Settings
+    private val client by lazy { OkHttpClient() }
+    private val converter by lazy { Converter() }
+    private val api by lazy { DABApi(client, converter, settings) }
 
-    override val client: ExtensionClient = object : LoginClient, LibraryFeedClient, PlaylistClient, TrackClient {
+    // From ExtensionClient (via SettingsProvider)
+    override fun setSettings(settings: Settings) {
+        this.settings = settings
+    }
 
-        private lateinit var settings: Settings
-        private val client by lazy { OkHttpClient() }
-        private val converter by lazy { Converter() }
-        private val api by lazy { DABApi(client, converter) }
+    // From ExtensionClient (via SettingsProvider)
+    override suspend fun getSettingItems(): List<Setting> {
+        return emptyList()
+    }
 
-        private val token: String?
-            get() = settings.getString("token")
+    // From LoginClient
+    override suspend fun getLoginStatus(): Boolean {
+        return settings.getString("token") != null
+    }
 
-        override fun setup(settings: SettingsProvider) {
-            settings.setSettings(object : Settings {
-                override fun getString(key: String, defaultValue: String?): String? {
-                    // Implement your logic to get from shared preferences or other storage
-                    return defaultValue
-                }
-                override fun set(key: String, value: String?) {
-                    // Implement your logic to save to shared preferences or other storage
-                }
-            }.also { this.settings = it })
-        }
+    // From LoginClient
+    override suspend fun login(credentials: Map<String, String>): User {
+        val email = credentials["email"] ?: error("Email is required")
+        val password = credentials["password"] ?: error("Password is required")
+        val userToken = api.login(email, password)
+        settings.putString("token", userToken)
+        return api.getMe()
+    }
 
-        override suspend fun getLoginStatus() = token != null
+    // From LoginClient
+    override suspend fun logout() {
+        settings.putString("token", null)
+    }
 
-        override suspend fun login(credentials: Map<String, String>): User {
-            val email = credentials["email"] ?: error("Email is required")
-            val password = credentials["password"] ?: error("Password is required")
-            val userToken = api.login(email, password)
-            settings.set("token", userToken)
-            return api.getMe(userToken)
-        }
+    // From LoginClient
+    override suspend fun getCurrentUser(): User? {
+        return runCatching { api.getMe() }.getOrNull()
+    }
 
-        override suspend fun logout() {
-            settings.set("token", null)
-        }
-
-        override suspend fun getCurrentUser(): User? {
-            val currentToken = token ?: return null
-            return runCatching { api.getMe(currentToken) }.getOrNull()
-        }
-
-        override fun getLoginSettings(): List<Setting> {
-            return listOf(
-                SettingTextInput("email", "Email", "Your DAB email", ""),
-                SettingTextInput("password", "Password", "Your DAB password", "", true)
+    // From LoginClient
+    override fun getLoginSettings(): List<Setting> {
+        return listOf(
+            SettingTextInput(
+                key = "email",
+                title = "Email",
+                summary = "Your DAB email",
+                defaultValue = ""
+            ),
+            SettingTextInput(
+                key = "password",
+                title = "Password",
+                summary = "Your DAB password",
+                defaultValue = ""
             )
-        }
+        )
+    }
 
-        override suspend fun loadLibraryFeed(): Feed<Shelf> {
-            val currentToken = token ?: error("Not logged in")
-            val playlists = api.getLibraryPlaylists(currentToken, 1, 50).loadAll()
-            val shelf = Shelf.Lists.Tracks("My Playlists", playlists, more = null)
-            return Feed(listOf(shelf))
-        }
+    // From LoginClient
+    override fun setLoginUser(user: User?) {
+        // This is a required function, but may not be needed for your specific login flow.
+    }
 
-        override suspend fun loadPlaylist(playlist: Playlist): Playlist {
-            val tracks = api.getPlaylistTracks(playlist, 1, 200).loadAll()
-            return playlist.copy(tracks = tracks)
-        }
+    // From LibraryFeedClient
+    override suspend fun loadLibraryFeed(): Feed<Shelf> {
+        val playlists = api.getLibraryPlaylists(1, 50).loadAll()
+        val shelf = Shelf.Lists.Items(
+            id = "library_playlists",
+            title = "My Playlists",
+            list = playlists,
+            more = null
+        )
+        return listOf(shelf).toFeed()
+    }
 
-        override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
-            val tracks = api.getPlaylistTracks(playlist, 1, 200)
-            return Feed.Paged(tracks)
-        }
+    // From PlaylistClient
+    override suspend fun loadPlaylist(playlist: Playlist): Playlist {
+        // We will just return the playlist as is, as the API doesn't provide a single playlist endpoint.
+        // To update track count, we would need to load all tracks, which can be slow.
+        return playlist
+    }
 
-        override suspend fun loadStreamableMedia(streamable: Streamable, isDownload: Boolean): Streamable.Media {
-            val url = streamable.extras["url"] ?: error("Streamable URL not found")
-            return Streamable.Media.fromUrl(url)
-        }
+    // From PlaylistClient
+    override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
+        val tracks: PagedData<Track> = api.getPlaylistTracks(playlist, 1, 200)
+        return tracks.toFeed()
+    }
 
-        override suspend fun loadTrack(track: EchoMediaItem.Track, isDownload: Boolean): EchoMediaItem.Track {
-            return track
-        }
+    // From PlaylistClient
+    override suspend fun loadFeed(playlist: Playlist): Feed<Shelf>? {
+        return null
+    }
 
-        override fun setLoginUser(user: User?) {
-            // Not needed for this extension
-        }
+    // From TrackClient
+    override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
+        return track
+    }
 
-        override suspend fun loadFeed(playlist: Playlist): Feed<Shelf>? {
-            return null
-        }
+    // From TrackClient
+    override suspend fun loadStreamableMedia(streamable: Streamable, isDownload: Boolean): Streamable.Media {
+        val url = streamable.extras["url"] ?: error("Streamable URL not found")
+        return url.toServerMedia()
+    }
 
-        override suspend fun loadFeed(track: Track): Feed<Shelf>? {
-            return null
-        }
+    // From TrackClient
+    override suspend fun loadFeed(track: Track): Feed<Shelf>? {
+        return null
     }
 }
+

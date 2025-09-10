@@ -5,13 +5,18 @@ import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
+import dev.brahmkshatriya.echo.common.settings.Settings
 import dev.brahmkshatriya.echo.extension.models.*
 import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
-class DABApi(private val client: OkHttpClient, private val converter: Converter) {
+class DABApi(
+    private val client: OkHttpClient,
+    private val converter: Converter,
+    private val settings: Settings
+) {
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -40,7 +45,8 @@ class DABApi(private val client: OkHttpClient, private val converter: Converter)
         return response.token
     }
 
-    fun getMe(token: String): User {
+    fun getMe(): User {
+        val token = settings.getString("token") ?: error("Not logged in")
         val request = Request.Builder()
             .url("https://dab.yeet.su/api/me")
             .header("Authorization", "Bearer $token")
@@ -49,7 +55,8 @@ class DABApi(private val client: OkHttpClient, private val converter: Converter)
         return converter.toUser(response.data)
     }
 
-    fun getLibraryPlaylists(token: String, page: Int, pageSize: Int): PagedData<Playlist> {
+    fun getLibraryPlaylists(page: Int, pageSize: Int): PagedData<Playlist> {
+        val token = settings.getString("token") ?: error("Not logged in")
         return PagedData.Continuous { continuation ->
             val pageNum = continuation?.toIntOrNull() ?: page
             val url = "https://dab.yeet.su/api/me/library/playlists?limit=$pageSize&offset=${(pageNum - 1) * pageSize}"

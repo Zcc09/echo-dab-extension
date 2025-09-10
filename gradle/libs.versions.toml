@@ -1,21 +1,19 @@
 [versions]
 echoCommon = "1.0"
-kotlin = "2.2.0" # Changed from "2.0.21" or "2.2.10"
-agp = "8.12.1"
-gradleShadow = "9.0.2"
-identityJvm = "202411.1"
+kotlin = "2.2.0"
+agp = "8.4.1"
+gradleShadow = "8.1.1"
 
 [libraries]
 echo-common = { module = "dev.brahmkshatriya.echo:common", version.ref = "echoCommon" }
 kotlin-stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
 junit = { module = "junit:junit", version = "4.13.2" }
-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version = "1.10.2" }
-identity-jvm = { group = "com.android.identity", name = "identity-jvm", version.ref = "identityJvm" }
+coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version = "1.8.0" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-gradle-shadow = { id = "com.gradleup.shadow", version.ref = "gradleShadow" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+gradle-shadow = { id = "com.github.johnrengelman.shadow", version.ref = "gradleShadow" }
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlinx-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
-

@@ -40,6 +40,7 @@ class Converter {
             streamables = listOf(
                 Streamable.server(
                     id = "stream",
+                    quality = 0,
                     extras = mapOf("url" to track.attributes.url)
                 )
             )
