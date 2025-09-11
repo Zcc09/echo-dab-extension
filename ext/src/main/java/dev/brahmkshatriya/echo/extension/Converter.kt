@@ -15,7 +15,6 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.JsonElement
 
 class Converter {
     // Allow setting the API instance after construction to avoid circular dependency
@@ -170,7 +169,7 @@ class Converter {
                 }
                 return Lyrics.Timed(items)
             }
-        } catch (e: Throwable) {
+        } catch (_: Throwable) {
             // LRC parsing failed -> continue to other parsers
         }
 
@@ -215,8 +214,7 @@ class Converter {
         for (el in arr) {
             when (el) {
                 is JsonPrimitive -> {
-                    val line = el.content.trim()
-                    // no timing info - skip for timed
+                    // primitive line without timing - skip
                 }
                 is JsonObject -> {
                     // detect word-by-word structure
@@ -304,7 +302,8 @@ class Converter {
         // - timestamps followed by separators like " - " or ": "
 
         // Remove bracketed or parenthesized timestamps (e.g. [mm:ss], (mm:ss.ms))
-        s = s.replace(Regex("""[\[\(]\s*\d{1,2}:\d{2}(?:[.:]\d{1,3})?\s*[\)\]]"""), " ")
+        // Use a character class for opening brackets and allow either ')' or ']' as closing bracket.
+        s = s.replace(Regex("""[\[(]\s*\d{1,2}:\d{2}(?:[.:]\d{1,3})?\s*[)\]]"""), " ")
 
         // Remove full hour:minute:second timestamps like 1:02:03 or 01:02:03.456
         s = s.replace(Regex("\\b\\d{1,2}:\\d{2}:\\d{2}(?:[.:]\\d{1,3})?\\b"), " ")
