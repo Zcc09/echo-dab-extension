@@ -9,13 +9,13 @@ import dev.brahmkshatriya.echo.common.settings.Settings
 import dev.brahmkshatriya.echo.extension.models.*
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.net.URLEncoder
 
 import java.util.Locale
 class DABApi(
@@ -215,6 +215,35 @@ class DABApi(
         }
     }
 
+    fun getArtistDetails(artistId: String): DabArtist? {
+        val url = "https://dab.yeet.su/api/artists/$artistId"
+        val request = Request.Builder().url(url).build()
+        val response = httpClient.newCall(request).execute()
+        if (!response.isSuccessful) return null
+        val body = response.body?.string() ?: return null
+        return try {
+            val artistResponse: DabArtistResponse = json.decodeFromString(body)
+            artistResponse.artists.firstOrNull()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun getArtistDiscography(artistId: String): List<DabAlbum> {
+        val url = "https://dab.yeet.su/api/discography?artistId=$artistId"
+        val request = Request.Builder().url(url).build()
+        val response = httpClient.newCall(request).execute()
+        if (!response.isSuccessful) return emptyList()
+        val body = response.body?.string() ?: return emptyList()
+        return try {
+            val discographyResponse: DabDiscographyResponse = json.decodeFromString(body)
+            discographyResponse.albums
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+
     fun getArtistImage(artistId: String): String? {
         val url = "https://dab.yeet.su/api/artists/$artistId"
         val request = Request.Builder().url(url).build()
@@ -232,104 +261,66 @@ class DABApi(
         }
     }
 
-    fun getAlbum(albumId: String): dev.brahmkshatriya.echo.common.models.Album? {
-        val url = "https://dab.yeet.su/api/albums/$albumId"
+    fun getAlbum(albumId: String): DabAlbum? {
+        val url = "https://dab.yeet.su/api/album/$albumId"
         val request = Request.Builder().url(url).build()
         val response = httpClient.newCall(request).execute()
         if (!response.isSuccessful) return null
         val body = response.body?.string() ?: return null
 
         return try {
-            val albumResponse: DabAlbumResponse = json.decodeFromString(body)
-            converter.toAlbum(albumResponse)
+            val albumResponse: DabSingleAlbumResponse = json.decodeFromString(body)
+            albumResponse.album
         } catch (_: Exception) {
             null
         }
     }
 
-    fun getAlbumTracks(albumId: String): List<dev.brahmkshatriya.echo.common.models.Track> {
-        val url = "https://dab.yeet.su/api/albums/$albumId/tracks"
-        val request = Request.Builder().url(url).build()
-        val response = httpClient.newCall(request).execute()
-        if (!response.isSuccessful) return emptyList()
-        val body = response.body?.string() ?: return emptyList()
-
-        return try {
-            val trackResponse: DabTrackResponse = json.decodeFromString(body)
-            trackResponse.tracks.map(converter::toTrack)
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
-
-    fun getLyrics(trackId: Int): String? {
-        val url = "https://dab.yeet.su/api/tracks/$trackId/lyrics"
+    fun getLyrics(artist: String, title: String): String? {
+        // Request lyrics from API
+        val encodedArtist = URLEncoder.encode(artist, "UTF-8")
+        val encodedTitle = URLEncoder.encode(title, "UTF-8")
+        val url = "https://dab.yeet.su/api/lyrics?artist=$encodedArtist&title=$encodedTitle"
         val request = Request.Builder().url(url).build()
         val response = httpClient.newCall(request).execute()
         if (!response.isSuccessful) return null
         val body = response.body?.string() ?: return null
+        return try {
+            val lyricsResponse: DabLyricsResponse = json.decodeFromString(body)
+            lyricsResponse.lyrics
+        } catch (e: Exception) {
+            // Fallback: try other JSON shapes or plain text
+             // Try to handle other JSON shapes: array of lines or object with array
+             try {
+                 val elem = json.parseToJsonElement(body)
+                 when (elem) {
+                     is JsonArray -> {
+                         val lrc = buildLrcFromJsonArray(elem)
+                         return lrc.takeIf { it.isNotBlank() }
+                     }
+                     is JsonObject -> {
+                         // Look for common array fields
+                         val arr = when {
+                             elem["lyrics"] is JsonArray -> elem["lyrics"] as JsonArray
+                             elem["lines"] is JsonArray -> elem["lines"] as JsonArray
+                             else -> null
+                         }
+                         if (arr != null) {
+                             val lrc = buildLrcFromJsonArray(arr)
+                             return lrc.takeIf { it.isNotBlank() }
+                         }
+                     }
+                     else -> { /* fallthrough */ }
+                 }
+             } catch (_: Exception) {
+                 // ignore parse error
+             }
 
-        // Try to parse JSON/structured responses first, fall back to plaintext or HTML-stripped text
-        try {
-            val elem: JsonElement = json.parseToJsonElement(body)
-
-            // If top-level is a primitive or array, handle simply
-            when (elem) {
-                is JsonPrimitive -> {
-                    val content = elem.content.trim()
-                    if (content.isNotEmpty()) return content
-                }
-                is JsonArray -> {
-                    // Try to convert array of lines/strings to LRC/plain text
-                    val lrc = buildLrcFromJsonArray(elem)
-                    if (lrc.isNotBlank()) return lrc
-                }
-                is JsonObject -> {
-                    // Common keys that might contain lyrics
-                    val candidates = listOf("lyrics", "lrc", "text", "data", "body")
-                    for (key in candidates) {
-                        val value = elem[key]
-                        if (value != null) {
-                            when (value) {
-                                is JsonPrimitive -> {
-                                    val s = value.content.trim()
-                                    if (s.isNotEmpty()) return stripHtml(s)
-                                }
-                                is JsonArray -> {
-                                    val lrc = buildLrcFromJsonArray(value)
-                                    if (lrc.isNotBlank()) return lrc
-                                }
-                                is JsonObject -> {
-                                    // Some responses might nest lines under data.lines etc.
-                                    val l = value["lines"]
-                                    if (l is JsonArray) {
-                                        val lrc = buildLrcFromJsonArray(l)
-                                        if (lrc.isNotBlank()) return lrc
-                                    }
-                                    // Try to stringify any primitive fields
-                                    val possibleText = value.values.filterIsInstance<JsonPrimitive>().joinToString("\n") { it.content }
-                                    if (possibleText.isNotBlank()) return stripHtml(possibleText)
-                                }
-                            }
-                        }
-                    }
-
-                    // Fallback: if object contains 'lines' or array-like content
-                    val lines = elem["lines"]
-                    if (lines is JsonArray) {
-                        val lrc = buildLrcFromJsonArray(lines)
-                        if (lrc.isNotBlank()) return lrc
-                    }
-                }
-            }
-        } catch (_: Exception) {
-            // ignore and try plaintext below
-        }
-
-        // If not JSON or parsing did not produce lyrics, treat body as plaintext and strip HTML
-        val plain = stripHtml(body).trim()
-        return if (plain.isNotEmpty()) plain else null
-    }
+             // If it's not JSON or conversion failed, try stripping HTML and return plain text
+            val stripped = stripHtml(body).trim()
+            stripped.takeIf { it.isNotBlank() }
+         }
+     }
 
     private fun buildLrcFromJsonArray(arr: JsonArray): String {
         val sb = StringBuilder()

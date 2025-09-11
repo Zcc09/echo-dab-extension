@@ -87,6 +87,11 @@ data class DabAlbumResponse(
 )
 
 @Serializable
+data class DabSingleAlbumResponse(
+    val album: DabAlbum
+)
+
+@Serializable
 data class DabAlbum(
     val id: String,
     val title: String,
@@ -94,7 +99,8 @@ data class DabAlbum(
     val artistId: Int?,
     val cover: String?,
     val releaseDate: String?,
-    val trackCount: Int
+    val trackCount: Int,
+    val tracks: List<DabTrack>? = null
 )
 
 @Serializable
@@ -107,4 +113,15 @@ data class DabArtist(
     val id: Int,
     val name: String,
     val picture: String?
+)
+
+@Serializable
+data class DabDiscographyResponse(
+    val artist: DabArtist?,
+    val albums: List<DabAlbum>
+)
+
+@Serializable
+data class DabLyricsResponse(
+    val lyrics: String?
 )
