@@ -6,13 +6,12 @@ plugins {
     alias(libs.plugins.gradle.shadow) apply false
 }
 
-// Add this block to force a consistent Kotlin version
 subprojects {
     configurations.all {
         resolutionStrategy.eachDependency {
             if (requested.group == "org.jetbrains.kotlin" && requested.name.startsWith("kotlin-")) {
                 useVersion(libs.versions.kotlin.get())
-                because("Align all Kotlin dependencies to the same version") // Corrected from reason() to because()
+                because("Align all Kotlin dependencies to the same version")
             }
         }
     }

@@ -8,7 +8,7 @@ plugins {
 
 android {
     namespace = "dev.brahmkshatriya.echo.extension"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 24

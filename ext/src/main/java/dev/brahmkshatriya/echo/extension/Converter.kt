@@ -3,6 +3,7 @@ package dev.brahmkshatriya.echo.extension
 import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
+import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toHexColorImageHolder
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
@@ -17,10 +18,21 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 class Converter {
-    // Allow setting the API instance after construction to avoid circular dependency
+
     var api: DABApi? = null
 
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
+
+    // Precompile regexes used frequently to avoid repeated allocations
+    private companion object {
+        val LRC_LINE_REGEX = Regex("\\[(\\d+):(\\d{2})(?:[.:](\\d{1,3}))?](.*)")
+        val BRACKET_TIMESTAMP_REGEX = Regex("[\\[(]\\s*\\d{1,2}:\\d{2}(?:[.:]\\d{1,3})?\\s*[)\\]]")
+        val FULL_HMS_REGEX = Regex("\\b\\d{1,2}:\\d{2}:\\d{2}(?:[.:]\\d{1,3})?\\b")
+        val MMSS_REGEX = Regex("\\b\\d{1,2}:\\d{2}(?:[.:]\\d{1,3})?\\b")
+        val LEADING_SEPARATORS_REGEX = Regex("^[\\s-:]+|[\\s-:]+$")
+        val MULTI_SPACE_REGEX = Regex("[\\t ]+")
+        val MULTI_NEWLINE_REGEX = Regex("(?:\\n\\s*){2,}")
+    }
 
     fun toUser(user: DabUser): User {
         return User(
@@ -35,12 +47,30 @@ class Converter {
             title = playlist.name,
             authors = listOf(Artist(id = "user", name = "You")),
             isEditable = false,
-            trackCount = playlist.trackCount.toLong()
+            trackCount = playlist.trackCount.toLong(),
+            // Generate a deterministic placeholder color cover based on playlist id/name
+            cover = generateColorForString(playlist.name)
         )
+    }
+
+    private fun generateColorForString(input: String?): dev.brahmkshatriya.echo.common.models.ImageHolder? {
+        val s = input ?: ""
+        // Simple deterministic color from string hash
+        val h = s.hashCode()
+        val r = (h shr 16) and 0xFF
+        val g = (h shr 8) and 0xFF
+        val b = h and 0xFF
+        val hex = String.format("#FF%02X%02X%02X", r, g, b)
+        return hex.toHexColorImageHolder()
     }
 
     fun toTrack(track: DabTrack): Track {
         val streamUrl = "https://dab.yeet.su/api/stream?trackId=${track.id}"
+
+        // Do NOT resolve the DAB API stream endpoint here to avoid issuing many network
+        // requests when building feeds. Store the API endpoint in extras and resolve
+        // on-demand when the user opens/plays a track.
+        val finalStreamUrl = streamUrl
 
         track.audioQuality?.let { aq ->
 
@@ -100,12 +130,16 @@ class Converter {
             cover = track.albumCover?.toImageHolder(),
             artists = listOf(artist),
             album = album,
+            // Provide a lightweight placeholder Streamable so the player has an item to
+            // request media for. This avoids eagerly resolving CDN URLs while allowing
+            // the player to call loadStreamableMedia when it needs to play a track.
             streamables = listOf(
                 Streamable.server(
-                    id = qualityDescription.replace(" ", "_").lowercase(),
+                    id = track.id.toString(),
                     quality = quality,
                     extras = mapOf(
-                        "url" to streamUrl,
+                        "dab_id" to track.id.toString(),
+                        "stream_url" to finalStreamUrl,
                         "qualityDescription" to qualityDescription,
                         "bitDepth" to (track.audioQuality?.maximumBitDepth?.toString() ?: "Unknown"),
                         "sampleRate" to (track.audioQuality?.maximumSamplingRate?.toString() ?: "Unknown"),
@@ -146,8 +180,7 @@ class Converter {
         // LRC parsing
         // Custom lightweight LRC parser to avoid calling the platform's fromText (which may be missing)
         try {
-            val lrcLineRegex = Regex("\\[(\\d+):(\\d{2})(?:[.:](\\d{1,3}))?](.*)")
-            val matches = lrcLineRegex.findAll(trimmed).toList()
+            val matches = LRC_LINE_REGEX.findAll(trimmed).toList()
             if (matches.isNotEmpty()) {
                 val parsed = matches.map { m ->
                     val min = m.groupValues[1].toLong()
@@ -303,23 +336,23 @@ class Converter {
 
         // Remove bracketed or parenthesized timestamps (e.g. [mm:ss], (mm:ss.ms))
         // Use a character class for opening brackets and allow either ')' or ']' as closing bracket.
-        s = s.replace(Regex("""[\[(]\s*\d{1,2}:\d{2}(?:[.:]\d{1,3})?\s*[)\]]"""), " ")
+        s = s.replace(BRACKET_TIMESTAMP_REGEX, " ")
 
         // Remove full hour:minute:second timestamps like 1:02:03 or 01:02:03.456
-        s = s.replace(Regex("\\b\\d{1,2}:\\d{2}:\\d{2}(?:[.:]\\d{1,3})?\\b"), " ")
+        s = s.replace(FULL_HMS_REGEX, " ")
 
         // Remove mm:ss(.ms) occurrences anywhere
-        s = s.replace(Regex("\\b\\d{1,2}:\\d{2}(?:[.:]\\d{1,3})?\\b"), " ")
+        s = s.replace(MMSS_REGEX, " ")
 
         // Remove common separators left over like leading dashes or colons at line starts
         s = s.lines().joinToString("\n") { line ->
-            line.replace(Regex("^[\\s-:]+|[\\s-:]+$") , "").trim()
+            line.replace(LEADING_SEPARATORS_REGEX, "").trim()
         }
 
         // Collapse multiple spaces/newlines and trim
-        s = s.replace(Regex("[\t ]+"), " ")
+        s = s.replace(MULTI_SPACE_REGEX, " ")
         s = s.lines().joinToString("\n") { it.trim() }
-        s = s.replace(Regex("(?:\\n\\s*){2,}"), "\n")
+        s = s.replace(MULTI_NEWLINE_REGEX, "\n")
         return s.trim()
     }
 

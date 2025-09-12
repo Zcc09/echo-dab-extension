@@ -12,7 +12,7 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "DAB Music Player Extension"
+rootProject.name = "DAB Music"
 include(":app")
 include(":ext")
 
