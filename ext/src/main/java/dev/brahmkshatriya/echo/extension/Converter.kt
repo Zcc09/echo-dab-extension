@@ -3,7 +3,6 @@ package dev.brahmkshatriya.echo.extension
 import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
-import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toHexColorImageHolder
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
@@ -16,6 +15,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 
 class Converter {
 
@@ -41,6 +41,7 @@ class Converter {
         )
     }
 
+    @Suppress("unused")
     fun toPlaylist(playlist: DabPlaylist): Playlist {
         return Playlist(
             id = playlist.id,
@@ -49,62 +50,49 @@ class Converter {
             isEditable = false,
             trackCount = playlist.trackCount.toLong(),
             // Generate a deterministic placeholder color cover based on playlist id/name
-            cover = generateColorForString(playlist.name)
+            cover = null
         )
     }
 
-    private fun generateColorForString(input: String?): dev.brahmkshatriya.echo.common.models.ImageHolder? {
-        val s = input ?: ""
-        // Simple deterministic color from string hash
-        val h = s.hashCode()
-        val r = (h shr 16) and 0xFF
-        val g = (h shr 8) and 0xFF
-        val b = h and 0xFF
-        val hex = String.format("#FF%02X%02X%02X", r, g, b)
-        return hex.toHexColorImageHolder()
-    }
+
 
     fun toTrack(track: DabTrack): Track {
         val streamUrl = "https://dab.yeet.su/api/stream?trackId=${track.id}"
 
-        // Do NOT resolve the DAB API stream endpoint here to avoid issuing many network
-        // requests when building feeds. Store the API endpoint in extras and resolve
-        // on-demand when the user opens/plays a track.
         val finalStreamUrl = streamUrl
 
         track.audioQuality?.let { aq ->
 
         }
 
-        // Map audio quality to numeric levels and create descriptive text
-        val (quality, qualityDescription) = when {
-            track.audioQuality != null -> {
-                val bitDepth = track.audioQuality.maximumBitDepth
-                val sampleRate = track.audioQuality.maximumSamplingRate // This is in kHz, not Hz
-                val isHiRes = track.audioQuality.isHiRes
+        // Determine a simple numeric quality for sorting and a human-readable file format
+        val (quality, qualityDescription) = run {
+            val aq = track.audioQuality
+            if (aq == null) {
+                1 to "Unknown"
+            } else {
+                val bitDepth = aq.maximumBitDepth
+                val sampleRate = aq.maximumSamplingRate
+                val isHiRes = aq.isHiRes
 
+                // Simple numeric quality used for sorting only (smaller range)
                 val numericQuality = when {
-                    isHiRes && bitDepth >= 24 && sampleRate >= 192.0 -> 5 // 24bit/192kHz+ Hi-Res
-                    isHiRes && bitDepth >= 24 && sampleRate >= 96.0 -> 4  // 24bit/96kHz+ Hi-Res
-                    isHiRes && bitDepth >= 24 && sampleRate >= 48.0 -> 3  // 24bit/48kHz+ Hi-Res
-                    bitDepth >= 16 && sampleRate >= 44.1 -> 2             // CD Quality 16bit/44.1kHz+
-                    else -> 1                                             // Standard quality
+                    isHiRes -> 3
+                    bitDepth >= 16 && sampleRate >= 44.1 -> 2
+                    else -> 1
                 }
 
-                val description = if (isHiRes) {
-                    "${bitDepth}bit/${sampleRate.toInt()}kHz Hi-Res"
-                } else {
-                    "${bitDepth}bit/${sampleRate.toInt()}kHz"
+                // Map basic characteristics to a likely container/format string
+                val format = when {
+                    isHiRes -> "FLAC"
+                    bitDepth >= 16 && sampleRate >= 44.1 -> "FLAC"
+                    else -> "MP3"
                 }
 
-                numericQuality to description
-            }
-            else -> {
-                1 to "Standard Quality"
+                numericQuality to format
             }
         }
 
-        // Create artist with image for info tab
         val artist = Artist(
             id = track.artistId?.toString() ?: track.artist,
             name = track.artist,
@@ -117,7 +105,6 @@ class Converter {
             Album(
                 id = track.albumId ?: it,
                 title = it,
-                // Add album cover from track data
                 cover = track.albumCover?.toImageHolder(),
                 artists = listOf(artist)
             )
@@ -126,7 +113,6 @@ class Converter {
         return Track(
             id = track.id.toString(),
             title = track.title,
-            // Add cover to track for the main player display
             cover = track.albumCover?.toImageHolder(),
             artists = listOf(artist),
             album = album,
@@ -151,13 +137,70 @@ class Converter {
         )
     }
 
+    // Map an Echo Track to a DAB-compatible JSON object for POSTing to /favorites
+    fun toDabTrackJson(track: Track): JsonObject {
+        return buildJsonObject {
+            // Some DAB servers expect a numeric `id`. Send a numeric id when the track.id is parseable,
+            // but always include a string `trackId` alias to be robust across deployments.
+            val idNum = track.id.toLongOrNull()
+            if (idNum != null) put("id", JsonPrimitive(idNum)) else put("id", JsonPrimitive(track.id))
+            put("trackId", JsonPrimitive(track.id))
+            put("title", JsonPrimitive(track.title))
+            put("name", JsonPrimitive(track.title))
+
+            val firstArtist = track.artists.firstOrNull()
+            put("artist", JsonPrimitive(firstArtist?.name ?: ""))
+            put("artistName", JsonPrimitive(firstArtist?.name ?: ""))
+            firstArtist?.id?.let { put("artistId", JsonPrimitive(it)) }
+
+            track.album?.let { alb ->
+                put("albumTitle", JsonPrimitive(alb.title))
+                put("albumId", JsonPrimitive(alb.id))
+                alb.cover?.let { cover ->
+                    try {
+                        val urlStr = when (cover) {
+                            is dev.brahmkshatriya.echo.common.models.ImageHolder.NetworkRequestImageHolder -> cover.request.url
+                            is dev.brahmkshatriya.echo.common.models.ImageHolder.ResourceUriImageHolder -> cover.uri
+                            else -> null
+                        }
+                        if (!urlStr.isNullOrBlank()) put("albumCover", JsonPrimitive(urlStr))
+                    } catch (_: Throwable) {}
+                }
+            }
+
+            track.duration?.let { durMs -> put("duration", JsonPrimitive((durMs / 1000).toInt())) }
+
+            track.extras["releaseDate"]?.let { put("releaseDate", JsonPrimitive(it)) }
+            track.extras["genre"]?.let { put("genre", JsonPrimitive(it)) }
+
+            // audioQuality
+            val bitDepth = track.extras["bitDepth"]
+            val sampleRate = track.extras["sampleRate"]
+            val isHiRes = track.extras["isHiRes"]
+            if (!bitDepth.isNullOrBlank() || !sampleRate.isNullOrBlank() || !isHiRes.isNullOrBlank()) {
+                val aq = buildJsonObject {
+                    bitDepth?.toIntOrNull()?.let { put("maximumBitDepth", JsonPrimitive(it)) }
+                    sampleRate?.toDoubleOrNull()?.let { put("maximumSamplingRate", JsonPrimitive(it)) }
+                    if (!isHiRes.isNullOrBlank()) put("isHiRes", JsonPrimitive(isHiRes.toBooleanStrictOrNull() ?: (isHiRes == "true")))
+                }
+                put("audioQuality", aq)
+            }
+
+            if (track.extras.isNotEmpty()) {
+                val extrasObj = buildJsonObject {
+                    for ((k, v) in track.extras) put(k, JsonPrimitive(v))
+                }
+                put("extras", extrasObj)
+            }
+        }
+    }
+
     fun toAlbum(album: dev.brahmkshatriya.echo.extension.models.DabAlbum): Album {
         return Album(
             id = album.id,
             title = album.title,
             cover = album.cover?.toImageHolder(),
             artists = listOf(Artist(id = album.artistId?.toString() ?: album.artist, name = album.artist)),
-            releaseDate = null, // DAB API returns string date, Echo expects Date - convert if needed
             trackCount = album.trackCount.toLong()
         )
     }
@@ -170,15 +213,11 @@ class Converter {
         )
     }
 
-    // Convert a raw lyrics string (plain or LRC) into the Echo Lyrics.Lyric model
     fun toLyricFromText(text: String?): Lyrics.Lyric? {
-        // Convert raw lyric text (LRC, JSON-shaped, or plain) into Lyrics.Lyric
         if (text == null) return null
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return null
 
-        // LRC parsing
-        // Custom lightweight LRC parser to avoid calling the platform's fromText (which may be missing)
         try {
             val matches = LRC_LINE_REGEX.findAll(trimmed).toList()
             if (matches.isNotEmpty()) {
@@ -239,8 +278,6 @@ class Converter {
     }
 
     private fun parseJsonArrayToLyric(arr: JsonArray): Lyrics.Lyric? {
-        // Heuristics: if elements have time/start + text -> Timed
-        // If elements have words arrays with timing -> WordByWord
         val timedItems = mutableListOf<Lyrics.Item>()
         val wordGroups = mutableListOf<List<Lyrics.Item>>()
 
@@ -300,7 +337,6 @@ class Converter {
         val asDouble = trimmed.toDoubleOrNull()
         if (asDouble != null) return (asDouble * 1000).toLong()
 
-        // hh:mm:ss.mmm or mm:ss.mmm
         val parts = trimmed.split(':')
         try {
             if (parts.size == 3) {
@@ -328,35 +364,21 @@ class Converter {
         // Remove simple HTML tags first
         var s = input.replace(Regex("<[^>]+>"), " ")
 
-        // Patterns to remove (global):
-        // - [mm:ss[.ms]] or (mm:ss[.ms])
-        // - mm:ss[.ms] anywhere (with optional leading/trailing separators)
-        // - H:mm:ss forms
-        // - timestamps followed by separators like " - " or ": "
-
-        // Remove bracketed or parenthesized timestamps (e.g. [mm:ss], (mm:ss.ms))
-        // Use a character class for opening brackets and allow either ')' or ']' as closing bracket.
         s = s.replace(BRACKET_TIMESTAMP_REGEX, " ")
 
-        // Remove full hour:minute:second timestamps like 1:02:03 or 01:02:03.456
         s = s.replace(FULL_HMS_REGEX, " ")
 
-        // Remove mm:ss(.ms) occurrences anywhere
         s = s.replace(MMSS_REGEX, " ")
 
-        // Remove common separators left over like leading dashes or colons at line starts
         s = s.lines().joinToString("\n") { line ->
             line.replace(LEADING_SEPARATORS_REGEX, "").trim()
         }
-
-        // Collapse multiple spaces/newlines and trim
         s = s.replace(MULTI_SPACE_REGEX, " ")
         s = s.lines().joinToString("\n") { it.trim() }
         s = s.replace(MULTI_NEWLINE_REGEX, "\n")
         return s.trim()
     }
 
-    // Public helper: remove timestamps and clean text for UI display
     fun cleanPlainText(text: String?): String {
         if (text == null) return ""
         return stripLrcTimestamps(text)

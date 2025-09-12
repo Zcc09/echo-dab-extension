@@ -15,10 +15,6 @@ data class DabUser(
     val email: String
 )
 
-@Serializable
-data class DabPlaylistResponse(
-    val libraries: List<DabPlaylist>
-)
 
 @Serializable
 data class DabPlaylist(
@@ -50,10 +46,6 @@ data class DabTrack(
     val audioQuality: DabAudioQuality?
 )
 
-@Serializable
-data class DabLibraryTracksResponse(
-    val library: DabLibrary
-)
 
 @Serializable
 data class DabLibrary(
@@ -81,10 +73,6 @@ data class DabStreamResponse(
     val link: String? = null
 )
 
-@Serializable
-data class DabAlbumResponse(
-    val albums: List<DabAlbum>
-)
 
 @Serializable
 data class DabSingleAlbumResponse(
@@ -104,22 +92,12 @@ data class DabAlbum(
 )
 
 @Serializable
-data class DabArtistResponse(
-    val artists: List<DabArtist>
-)
-
-@Serializable
 data class DabArtist(
     val id: Int,
     val name: String,
     val picture: String?
 )
 
-@Serializable
-data class DabDiscographyResponse(
-    val artist: DabArtist?,
-    val albums: List<DabAlbum>
-)
 
 @Serializable
 data class DabLyricsResponse(
