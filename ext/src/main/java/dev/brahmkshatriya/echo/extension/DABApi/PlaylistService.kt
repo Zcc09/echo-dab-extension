@@ -133,6 +133,9 @@ class PlaylistService(
                     }
                 }
             }
+            else -> {
+                // Handle JsonLiteral, JsonNull and other cases
+            }
         }
         return out
     }
