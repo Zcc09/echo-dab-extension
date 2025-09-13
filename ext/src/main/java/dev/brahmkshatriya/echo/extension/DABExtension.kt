@@ -44,9 +44,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     private val tabs = listOf(
         Tab(id = "all", title = "All"),
         Tab(id = "playlists", title = "Playlists"),
-        Tab(id = "tracks", title = "Tracks"),
-        Tab(id = "albums", title = "Albums"),
-        Tab(id = "artists", title = "Artists")
+        Tab(id = "tracks", title = "Tracks")
     )
 
     private val json by lazy { Json { ignoreUnknownKeys = true; coerceInputValues = true } }
@@ -225,8 +223,6 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                                 async(Dispatchers.Default) {
                                     when (t.id) {
                                         "playlists" -> loadPlaylistShelves()
-                                        "albums" -> loadAlbumShelves()
-                                        "artists" -> loadArtistShelves()
                                         "tracks" -> loadFavoritesShelves()
                                         else -> null
                                     }
@@ -240,31 +236,18 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 "playlists" -> {
                     val paged = PagedData.Single<Shelf> {
                         if (!api.hasValidSession()) throw ClientException.LoginRequired()
-                        val pls = try { withContext(Dispatchers.IO) { api.fetchLibraryPlaylistsPage(1, 50) } } catch (_: Throwable) { emptyList<Playlist>() }
-                        if (pls.isEmpty()) emptyList() else pls.map { it.toShelf() }
-                    }
-                    Feed.Data(paged)
-                }
-                "albums" -> {
-                    val paged = PagedData.Single<Shelf> {
-                        if (!api.hasValidSession()) throw ClientException.LoginRequired()
-                        loadAlbumShelves() ?: emptyList()
-                    }
-                    Feed.Data(paged)
-                }
-                "artists" -> {
-                    val paged = PagedData.Single<Shelf> {
-                        if (!api.hasValidSession()) throw ClientException.LoginRequired()
-                        loadArtistShelves() ?: emptyList()
+                        val shelves = try { withContext(Dispatchers.IO) { loadPlaylistShelves() } } catch (_: Throwable) { null }
+                        shelves ?: emptyList()
                     }
                     Feed.Data(paged)
                 }
                 "tracks" -> {
                     val paged = PagedData.Single<Shelf> {
                         if (!api.hasValidSession()) throw ClientException.LoginRequired()
-                        loadFavoritesShelves() ?: emptyList()
+                        val favs = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList<Track>() }
+                        if (favs.isEmpty()) emptyList() else mutableListOf(Shelf.Lists.Items(id = "tracks_flat",title = "Favorites",  list = favs, type = Shelf.Lists.Type.Grid))
                     }
-                    Feed.Data(paged, Feed.Buttons(showSearch = false, showSort = false, showPlayAndShuffle = true))
+                    Feed.Data(paged, Feed.Buttons(showSearch = true, showSort = false, showPlayAndShuffle = true))
                 }
                 else -> emptyList<Shelf>().toFeedData()
             }
@@ -355,7 +338,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     private suspend fun loadFavoritesShelves(): List<Shelf>? {
         if (!api.hasValidSession()) return null
         val favs = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList<Track>() }
-        return if (favs.isEmpty()) null else listOf(Shelf.Lists.Tracks(id = "favorites_tracks", title = "Favorites", list = favs))
+        return if (favs.isEmpty()) null else listOf(Shelf.Lists.Tracks(id = "favorites_tracks", title = "Favorites", list = favs, type = Shelf.Lists.Type.Grid))
     }
 
     private fun probeEndpoints(candidates: List<String>): JsonElement? {
@@ -446,7 +429,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         Log.d("DABExtension", "loadTracks called for playlist=${playlist.id}, title='${playlist.title}'")
 
         try {
-            val tracks: PagedData<Track> = api.getPlaylistTracks(playlist, 200)
+            val tracks: PagedData<Track> = api.getPlaylistTracks(playlist, 1000)
             val trackList = tracks.loadAll()
             Log.d("DABExtension", "loadTracks returning ${trackList.size} tracks for playlist=${playlist.id}")
 
@@ -554,6 +537,8 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                     val pagedAll: PagedData<Shelf> = PagedData.Single {
                         try {
                             Log.d("DABExtension", "Performing unified search for all types")
+
+                            // Use unified search endpoint for all types
                             val (tracks, albums, artists) = withContext(Dispatchers.IO) {
                                 api.searchAll(query, 20)
                             }
@@ -562,10 +547,11 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
                             // Add tracks shelf if we have results
                             if (tracks.isNotEmpty()) {
-                                shelves.add(Shelf.Lists.Tracks(
+                                shelves.add(Shelf.Lists.Items(
                                     id = "search_all_tracks",
                                     title = "Tracks",
-                                    list = tracks.take(10) // Limit for "All" view
+                                    list = tracks.take(20),
+                                    type = Shelf.Lists.Type.Grid // Limit for "All" view
                                 ))
                             }
 
@@ -574,7 +560,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                                 shelves.add(Shelf.Lists.Items(
                                     id = "search_all_albums",
                                     title = "Albums",
-                                    list = albums.take(10), // Limit for "All" view
+                                    list = albums.take(20), // Limit for "All" view
                                     type = Shelf.Lists.Type.Grid
                                 ))
                             }
@@ -584,15 +570,38 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                                 shelves.add(Shelf.Lists.Items(
                                     id = "search_all_artists",
                                     title = "Artists",
-                                    list = artists.take(10), // Limit for "All" view
+                                    list = artists.take(20), // Limit for "All" view
                                     type = Shelf.Lists.Type.Grid
                                 ))
                             }
 
-                            Log.d("DABExtension", "All search results: ${tracks.size} tracks, ${albums.size} albums, ${artists.size} artists")
+                            // Fallback: If albums/artists are empty, run separate searches
+                            if (albums.isEmpty() || artists.isEmpty()) {
+                                val fallbackAlbums = if (albums.isEmpty()) withContext(Dispatchers.IO) { api.searchAlbums(query, 10) } else emptyList()
+                                val fallbackArtists = if (artists.isEmpty()) withContext(Dispatchers.IO) { api.searchArtists(query, 10) } else emptyList()
+                                if (fallbackAlbums.isNotEmpty()) {
+                                    shelves.add(Shelf.Lists.Items(
+                                        id = "search_all_albums_fallback",
+                                        title = "Albums",
+                                        list = fallbackAlbums,
+                                        type = Shelf.Lists.Type.Grid
+                                    ))
+                                }
+                                if (fallbackArtists.isNotEmpty()) {
+                                    shelves.add(Shelf.Lists.Items(
+                                        id = "search_all_artists_fallback",
+                                        title = "Artists",
+                                        list = fallbackArtists,
+                                        type = Shelf.Lists.Type.Grid
+                                    ))
+                                }
+                            }
+
+                            Log.d("DABExtension", "Unified search results: "+
+                                "${tracks.size} tracks, ${albums.size} albums, ${artists.size} artists")
                             shelves
                         } catch (e: Throwable) {
-                            Log.e("DABExtension", "Exception in unified search: ${e.message}", e)
+                            Log.e("DABExtension", "Exception in unified search: "+e.message, e)
                             emptyList()
                         }
                     }
@@ -610,10 +619,11 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                             if (tracks.isEmpty()) {
                                 emptyList()
                             } else {
-                                listOf(Shelf.Lists.Tracks(
+                                listOf(Shelf.Lists.Items(
                                     id = "search_tracks",
                                     title = "Results",
-                                    list = tracks
+                                    list = tracks,
+                                    type = Shelf.Lists.Type.Grid
                                 ))
                             }
                         } catch (e: Throwable) {
@@ -628,7 +638,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                         try {
                             Log.d("DABExtension", "Searching for albums")
                             val albums = withContext(Dispatchers.IO) {
-                                api.searchAlbums(query, 50)
+                                api.searchAlbums(query, 20)
                             }
                             Log.d("DABExtension", "Found ${albums.size} album results")
 

@@ -941,7 +941,17 @@ class DABApi(
                     val results = when (type) {
                         "track" -> parseSearchResponse(body, ::parseTrackResult)
                         "album" -> parseSearchResponse(body, ::parseAlbumResult)
-                        "artist" -> parseSearchResponse(body, ::parseArtistResult)
+                        "artist" -> {
+                            // Try to parse as artists first
+                            val artistResults = parseSearchResponse(body, ::parseArtistResult)
+                            if (artistResults.isNotEmpty()) {
+                                artistResults
+                            } else {
+                                // If no artists found, extract unique artists from track results
+                                Log.d("DABApi", "No direct artist results, extracting artists from track data")
+                                extractArtistsFromResponse(body)
+                            }
+                        }
                         else -> emptyList()
                     }
 
@@ -955,26 +965,97 @@ class DABApi(
         }
     }
 
+    // Extract unique artists from track search results
+    private fun extractArtistsFromResponse(body: String): List<Artist> {
+        try {
+            val root = json.parseToJsonElement(body) as? JsonObject ?: return emptyList()
+            val tracksArray = root["tracks"] as? JsonArray ?: return emptyList()
+
+            Log.d("DABApi", "Extracting artists from ${tracksArray.size} track results")
+
+            val uniqueArtists = mutableMapOf<String, Artist>()
+
+            for (element in tracksArray) {
+                if (element !is JsonObject) continue
+
+                try {
+                    val artistName = (element["artist"] as? JsonPrimitive)?.content
+                    val artistIdStr = (element["artistId"] as? JsonPrimitive)?.content
+                    val albumCover = (element["albumCover"] as? JsonPrimitive)?.content
+
+                    if (!artistName.isNullOrBlank() && !artistIdStr.isNullOrBlank()) {
+                        val artistId = artistIdStr.toIntOrNull()
+                        if (artistId != null && !uniqueArtists.containsKey(artistIdStr)) {
+                            val dabArtist = DabArtist(
+                                id = artistId,
+                                name = artistName,
+                                picture = albumCover // Use album cover as artist picture
+                            )
+                            val convertedArtist = converter.toArtist(dabArtist)
+                            uniqueArtists[artistIdStr] = convertedArtist
+                            Log.d("DABApi", "Extracted artist: '$artistName' (ID: $artistId)")
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.w("DABApi", "Failed to extract artist from track: ${e.message}")
+                }
+            }
+
+            val artistList = uniqueArtists.values.toList()
+            Log.d("DABApi", "Extracted ${artistList.size} unique artists from track results")
+            return artistList
+
+        } catch (e: Throwable) {
+            Log.w("DABApi", "Failed to extract artists from response: ${e.message}")
+            return emptyList()
+        }
+    }
+
     // Consolidated search response parsing
     private fun parseSearchResponse(body: String, parser: (JsonObject) -> Any?): List<Any> {
         Log.d("DABApi", "Parsing search response with parser")
 
         // Try different response formats that the DAB API might return
 
-        // 1. Try the actual DAB API format: {"tracks":[...]} for track searches
+        // 1. Try the actual DAB API format: {"results":[...]} (most common)
         try {
             val root = json.parseToJsonElement(body) as? JsonObject
             if (root != null) {
-                Log.d("DABApi", "Parsing as object format (checking for tracks array)")
-                val candidates = listOf("tracks", "results", "data", "items", "content")
-                for (key in candidates) {
+                Log.d("DABApi", "Parsing as object format")
+
+                // First try the standard DAB API results array
+                val resultsArray = root["results"] as? JsonArray
+                if (resultsArray != null) {
+                    Log.d("DABApi", "Found 'results' array with ${resultsArray.size} items")
+                    val results = resultsArray.mapNotNull { element ->
+                        if (element is JsonObject) {
+                            val parsed = parser(element)
+                            Log.v("DABApi", "Parsed result item: ${parsed?.javaClass?.simpleName}")
+                            parsed
+                        } else null
+                    }
+                    if (results.isNotEmpty()) {
+                        Log.d("DABApi", "Successfully parsed ${results.size} items from 'results' array")
+                        return results
+                    }
+                }
+
+                // Then try type-specific arrays (for different API variations)
+                val typeSpecificKeys = when (parser) {
+                    ::parseTrackResult -> listOf("tracks", "songs")
+                    ::parseAlbumResult -> listOf("albums", "releases")
+                    ::parseArtistResult -> listOf("artists", "performers")
+                    else -> listOf("tracks", "albums", "artists", "data", "items", "content")
+                }
+
+                for (key in typeSpecificKeys) {
                     val arr = root[key] as? JsonArray
                     if (arr != null) {
                         Log.d("DABApi", "Found array in key '$key' with ${arr.size} items")
                         val results = arr.mapNotNull { element ->
                             if (element is JsonObject) {
                                 val parsed = parser(element)
-                                Log.v("DABApi", "Parsed object item: ${parsed?.javaClass?.simpleName}")
+                                Log.v("DABApi", "Parsed $key item: ${parsed?.javaClass?.simpleName}")
                                 parsed
                             } else null
                         }
@@ -1009,7 +1090,7 @@ class DABApi(
             Log.d("DABApi", "Structured search response parsing failed: ${e.message}")
         }
 
-        // 3. Try simple array format [track1, track2, ...]
+        // 3. Try simple array format [item1, item2, ...]
         try {
             val rootArray = json.parseToJsonElement(body) as? JsonArray
             if (rootArray != null) {
@@ -1027,8 +1108,7 @@ class DABApi(
             Log.d("DABApi", "Simple array parsing failed: ${e.message}")
         }
 
-
-        // 4. Try raw track parsing (single track response)
+        // 4. Try single item response
         try {
             val singleItem = json.parseToJsonElement(body) as? JsonObject
             if (singleItem != null) {
@@ -1044,6 +1124,7 @@ class DABApi(
         }
 
         Log.w("DABApi", "All parsing attempts failed, returning empty list")
+        Log.w("DABApi", "Response body preview: ${body.take(500)}")
         return emptyList()
     }
 
@@ -1206,11 +1287,17 @@ class DABApi(
     }
 
     private fun parseAlbumResult(el: JsonObject): Album? {
+        Log.d("DABApi", "Parsing album result from JsonObject with keys: ${el.keys}")
+
         return try {
             // Try direct DabAlbum parsing first
             val dabAlbum = json.decodeFromJsonElement(DabAlbum.serializer(), el)
-            converter.toAlbum(dabAlbum)
+            val convertedAlbum = converter.toAlbum(dabAlbum)
+            Log.d("DABApi", "Successfully parsed album: '${convertedAlbum.title}' by '${convertedAlbum.artists.firstOrNull()?.name}'")
+            convertedAlbum
         } catch (e: Throwable) {
+            Log.d("DABApi", "Direct DabAlbum parsing failed: ${e.message}, trying manual parsing")
+
             // Enhanced manual parsing for albums
             try {
                 val id = (el["id"] as? JsonPrimitive)?.content
@@ -1225,6 +1312,8 @@ class DABApi(
                 val releaseDate = (el["releaseDate"] as? JsonPrimitive)?.content
                 val trackCount = (el["trackCount"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
 
+                Log.d("DABApi", "Manual album parsing - ID: $id, Title: '$title', Artist: '$artist', TrackCount: $trackCount")
+
                 val dabAlbum = DabAlbum(
                     id = id,
                     title = title,
@@ -1235,20 +1324,29 @@ class DABApi(
                     trackCount = trackCount,
                     tracks = null
                 )
-                converter.toAlbum(dabAlbum)
+                val convertedAlbum = converter.toAlbum(dabAlbum)
+                Log.d("DABApi", "Manual album parsing successful: '${convertedAlbum.title}' by '${convertedAlbum.artists.firstOrNull()?.name}'")
+                convertedAlbum
             } catch (e2: Throwable) {
-                Log.w("DABApi", "Failed to parse album result: ${e2.message}")
+                Log.w("DABApi", "Failed to parse album result manually: ${e2.message}")
+                Log.w("DABApi", "JsonObject contents: $el")
                 null
             }
         }
     }
 
     private fun parseArtistResult(el: JsonObject): Artist? {
+        Log.d("DABApi", "Parsing artist result from JsonObject with keys: ${el.keys}")
+
         return try {
             // Try direct DabArtist parsing first
             val dabArtist = json.decodeFromJsonElement(DabArtist.serializer(), el)
-            converter.toArtist(dabArtist)
+            val convertedArtist = converter.toArtist(dabArtist)
+            Log.d("DABApi", "Successfully parsed artist: '${convertedArtist.name}'")
+            convertedArtist
         } catch (e: Throwable) {
+            Log.d("DABApi", "Direct DabArtist parsing failed: ${e.message}, trying manual parsing")
+
             // Enhanced manual parsing for artists
             try {
                 val idEl = el["id"] ?: el["artistId"] ?: return null
@@ -1262,14 +1360,19 @@ class DABApi(
                     ?: (el["cover"] as? JsonPrimitive)?.content
                     ?: (el["image"] as? JsonPrimitive)?.content
 
+                Log.d("DABApi", "Manual artist parsing - ID: $idInt, Name: '$name'")
+
                 val dabArtist = DabArtist(
                     id = idInt,
                     name = name,
                     picture = picture
                 )
-                converter.toArtist(dabArtist)
+                val convertedArtist = converter.toArtist(dabArtist)
+                Log.d("DABApi", "Manual artist parsing successful: '${convertedArtist.name}'")
+                convertedArtist
             } catch (e2: Throwable) {
-                Log.w("DABApi", "Failed to parse artist result: ${e2.message}")
+                Log.w("DABApi", "Failed to parse artist result manually: ${e2.message}")
+                Log.w("DABApi", "JsonObject contents: $el")
                 null
             }
         }
