@@ -124,3 +124,38 @@ data class DabLibraryData(
 data class DabLibrariesResponse(
     val libraries: List<DabLibraryData> = emptyList()
 )
+
+@Serializable
+data class DabSearchResponse(
+    val results: List<DabSearchResult> = emptyList()
+)
+
+@Serializable
+data class DabSearchResult(
+    // Track fields
+    val id: String? = null,
+    val title: String? = null,
+    val artist: String? = null,
+    val artistId: String? = null,
+    val albumTitle: String? = null,
+    val albumCover: String? = null,
+    val albumId: String? = null,
+    val releaseDate: String? = null,
+    val genre: String? = null,
+    val duration: Int? = null,
+    val audioQuality: DabAudioQuality? = null,
+
+    // Album fields
+    val trackCount: Int? = null,
+    val tracks: List<DabTrack>? = null,
+    val cover: String? = null,
+    val label: String? = null,
+
+    // Artist fields
+    val name: String? = null,
+    val picture: String? = null,
+    val albumsCount: Int? = null,
+
+    // Common fields to help identify type
+    val type: String? = null // Sometimes APIs include this
+)

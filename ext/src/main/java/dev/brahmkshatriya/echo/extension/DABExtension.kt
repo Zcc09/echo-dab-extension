@@ -65,7 +65,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 } else {
                     val maxAttempts = 3
                     var lastResult = false
-                    for (attempt in 1..maxAttempts) {
+                    for (attemptNum in 1..maxAttempts) {
                         try {
                             api.removeFavorite(trackId)
                             delay(300L)
@@ -276,17 +276,54 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         val pls = try { withContext(Dispatchers.IO) { api.fetchLibraryPlaylistsPage(1, 50) } } catch (_: Throwable) { emptyList<Playlist>() }
         if (pls.isEmpty()) return null
 
-        return pls.map { p ->
+        return pls.map { playlist ->
             val playlistWithCover = try {
-                val existingCover = p.cover
-                val derivedCover = if (existingCover == null) {
-                    val tracksForCover = try { withContext(Dispatchers.IO) { api.fetchAllPlaylistTracks(p, 6) } } catch (_: Throwable) { emptyList<Track>() }
-                    tracksForCover.firstOrNull()?.cover
-                } else existingCover
+                // If playlist already has a cover, use it
+                if (playlist.cover != null) {
+                    Log.d("DABExtension", "Playlist ${playlist.id} already has cover, using existing")
+                    playlist
+                } else {
+                    // Fetch tracks to get cover from latest added track
+                    Log.d("DABExtension", "Playlist ${playlist.id} has no cover, fetching tracks for cover")
+                    val tracksForCover = try {
+                        withContext(Dispatchers.IO) {
+                            // Get first few tracks to find a cover
+                            api.fetchAllPlaylistTracks(playlist, 10)
+                        }
+                    } catch (e: Throwable) {
+                        Log.w("DABExtension", "Failed to fetch tracks for cover: ${e.message}")
+                        emptyList<Track>()
+                    }
 
-                val finalCover = derivedCover ?: try { "file:///android_asset/ext/icon.png".toResourceUriImageHolder() } catch (_: Throwable) { null }
-                if (finalCover != null) p.copy(cover = finalCover) else p
-            } catch (_: Throwable) { p }
+                    if (tracksForCover.isNotEmpty()) {
+                        // Try to find the first track with a cover
+                        val trackWithCover = tracksForCover.firstOrNull { it.cover != null }
+                        if (trackWithCover != null) {
+                            Log.d("DABExtension", "Using cover from track '${trackWithCover.title}' for playlist ${playlist.id}")
+                            playlist.copy(cover = trackWithCover.cover)
+                        } else {
+                            Log.d("DABExtension", "No tracks with covers found for playlist ${playlist.id}, using default")
+                            // Use a default cover as fallback
+                            try {
+                                playlist.copy(cover = "file:///android_asset/ext/icon.png".toResourceUriImageHolder())
+                            } catch (_: Throwable) {
+                                playlist
+                            }
+                        }
+                    } else {
+                        Log.d("DABExtension", "No tracks found for playlist ${playlist.id}, using default cover")
+                        // Use default cover when no tracks are found
+                        try {
+                            playlist.copy(cover = "file:///android_asset/ext/icon.png".toResourceUriImageHolder())
+                        } catch (_: Throwable) {
+                            playlist
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.w("DABExtension", "Exception while setting playlist cover: ${e.message}")
+                playlist
+            }
 
             Shelf.Item(playlistWithCover)
         }
@@ -321,7 +358,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         return if (favs.isEmpty()) null else listOf(Shelf.Lists.Tracks(id = "favorites_tracks", title = "Favorites", list = favs))
     }
 
-    private suspend fun probeEndpoints(candidates: List<String>): JsonElement? {
+    private fun probeEndpoints(candidates: List<String>): JsonElement? {
         if (!api.hasValidSession()) return null
 
         for (url in candidates) {
@@ -463,10 +500,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track = track
 
     override suspend fun loadStreamableMedia(streamable: Streamable, isDownload: Boolean): Streamable.Media {
-        val candidate = listOf("url", "stream_url", "dab_id", "trackId", "track_id", "id", "track")
-            .mapNotNull { streamable.extras[it] }
-            .firstOrNull()
-            ?.toString()
+        val candidate = streamable.extras.values.firstNotNullOfOrNull { it }
             ?: error("Track ID not found in extras")
 
         val streamUrl = withContext(Dispatchers.IO) {
@@ -498,102 +532,121 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
     override suspend fun loadFeed(track: Track): Feed<Shelf>? = null
 
-    override suspend fun loadSearchFeed(query: String): Feed<Shelf> = emptyList<Shelf>().toFeed()
+    override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
+        if (query.isBlank()) {
+            Log.d("DABExtension", "Empty search query, returning empty feed")
+            return emptyList<Shelf>().toFeed()
+        }
+
+        Log.d("DABExtension", "loadSearchFeed called with query: '$query'")
+
+        // Simple tracks-only search - no tabs needed for single content type
+        val paged = PagedData.Single<Shelf> {
+            try {
+                Log.d("DABExtension", "Searching for tracks (no authentication required)")
+                val tracks = withContext(Dispatchers.IO) {
+                    api.searchTracks(query, 50)
+                }
+                Log.d("DABExtension", "Found ${tracks.size} track results")
+
+                if (tracks.isEmpty()) {
+                    emptyList()
+                } else {
+                    listOf(Shelf.Lists.Tracks(
+                        id = "search_tracks",
+                        title = "Results",
+                        list = tracks
+                    ))
+                }
+            } catch (e: Throwable) {
+                Log.e("DABExtension", "Exception in track search: ${e.message}", e)
+                emptyList()
+            }
+        }
+
+        return paged.toFeed()
+    }
 
     // --- AlbumClient ---
     override suspend fun loadAlbum(album: Album): Album {
-        val dab = try { withContext(Dispatchers.IO) { api.getAlbum(album.id) } } catch (_: Throwable) { null }
-        return dab?.let { converter.toAlbum(it) } ?: album
+        val dabAlbum = withContext(Dispatchers.IO) {
+            api.getAlbum(album.id)
+        }
+        return dabAlbum?.let { converter.toAlbum(it) } ?: album
     }
 
-    override suspend fun loadTracks(album: Album): Feed<Track> {
-        val dab = try { withContext(Dispatchers.IO) { api.getAlbum(album.id) } } catch (_: Throwable) { null }
-        val tracks = dab?.tracks?.map { converter.toTrack(it) } ?: emptyList()
-        return tracks.toFeed()
+    override suspend fun loadTracks(album: Album): Feed<Track>? {
+        val dabAlbum = withContext(Dispatchers.IO) {
+            api.getAlbum(album.id)
+        }
+        return dabAlbum?.tracks?.map { converter.toTrack(it) }?.toFeed()
     }
 
     override suspend fun loadFeed(album: Album): Feed<Shelf>? {
-        val dabAlbum = try { withContext(Dispatchers.IO) { api.getAlbum(album.id) } } catch (_: Throwable) { null } ?: return null
-        val shelves = mutableListOf<Shelf>()
-        shelves.add(Shelf.Item(converter.toAlbum(dabAlbum)))
+        val dabAlbum = withContext(Dispatchers.IO) {
+            api.getAlbum(album.id)
+        }
+        val tracks = dabAlbum?.tracks?.map { converter.toTrack(it) } ?: return null
+        if (tracks.isEmpty()) return null
 
-        val tracks = dabAlbum.tracks?.map { converter.toTrack(it) } ?: emptyList()
-        if (tracks.isNotEmpty()) {
-            shelves.add(Shelf.Lists.Tracks(
+        val shelves = listOf(
+            Shelf.Lists.Tracks(
                 id = "album_tracks_${album.id}",
                 title = "Tracks",
                 list = tracks
-            ))
-        }
+            )
+        )
         return shelves.toFeed()
     }
 
     // --- ArtistClient ---
     override suspend fun loadArtist(artist: Artist): Artist {
-        val artistDetails = api.getArtistDetails(artist.id)
-        return artistDetails?.let { converter.toArtist(it) } ?: artist
+        val dabArtist = withContext(Dispatchers.IO) {
+            api.getArtistDetails(artist.id)
+        }
+        return dabArtist?.let { converter.toArtist(it) } ?: artist
     }
 
     override suspend fun loadFeed(artist: Artist): Feed<Shelf> {
-        val shelves = mutableListOf<Shelf>()
-        val discography = api.getArtistDiscography(artist.id)
-
-        // Add top tracks from first album
-        val firstAlbum = discography.firstOrNull()
-        if (firstAlbum != null) {
-            val albumWithTracks = try { withContext(Dispatchers.IO) { api.getAlbum(firstAlbum.id) } } catch (_: Throwable) { null }
-            val topTracks = albumWithTracks?.tracks?.map { converter.toTrack(it) }?.take(10) ?: emptyList()
-            if (topTracks.isNotEmpty()) {
-                shelves.add(Shelf.Lists.Tracks(
-                    id = "artist_top_tracks_${artist.id}",
-                    title = "Top Tracks",
-                    list = topTracks
-                ))
-            }
+        val albums = withContext(Dispatchers.IO) {
+            api.getArtistDiscography(artist.id)
         }
 
-        // Add albums
-        val albums = discography.map { converter.toAlbum(it) }
-        if (albums.isNotEmpty()) {
-            shelves.add(Shelf.Lists.Items(
+        if (albums.isEmpty()) return emptyList<Shelf>().toFeed()
+
+        val albumItems = albums.map { converter.toAlbum(it) }
+        val shelves = listOf(
+            Shelf.Lists.Items(
                 id = "artist_albums_${artist.id}",
                 title = "Albums",
-                list = albums,
+                list = albumItems,
                 type = Shelf.Lists.Type.Grid
-            ))
-        }
-
+            )
+        )
         return shelves.toFeed()
     }
 
     // --- LyricsClient ---
-    override suspend fun loadLyrics(lyrics: dev.brahmkshatriya.echo.common.models.Lyrics): dev.brahmkshatriya.echo.common.models.Lyrics {
-        val artist = lyrics.extras["artistName"] ?: return lyrics
-        val lyricsText = try { withContext(Dispatchers.IO) { api.getLyrics(artist, lyrics.title) } } catch (_: Throwable) { null }
+    override suspend fun loadLyrics(lyrics: Lyrics): Lyrics = lyrics
 
-        if (lyricsText.isNullOrBlank()) return lyrics.copy(lyrics = dev.brahmkshatriya.echo.common.models.Lyrics.Simple(""))
+    override suspend fun searchTrackLyrics(clientId: String, track: Track): Feed<Lyrics> {
+        val artist = track.artists.firstOrNull()?.name ?: return emptyList<Lyrics>().toFeed()
+        val lyricsText = withContext(Dispatchers.IO) {
+            api.getLyrics(artist, track.title)
+        }
 
-        val lyricObj = try { converter.toLyricFromText(lyricsText) } catch (_: Throwable) { null }
-        if (lyricObj != null) return lyrics.copy(lyrics = lyricObj)
+        if (lyricsText.isNullOrBlank()) return emptyList<Lyrics>().toFeed()
 
-        val fallback = dev.brahmkshatriya.echo.common.models.Lyrics.Simple(converter.cleanPlainText(lyricsText))
-        return lyrics.copy(lyrics = fallback)
-    }
+        val convertedLyrics = converter.toLyricFromText(lyricsText)
+            ?: Lyrics.Simple(converter.cleanPlainText(lyricsText))
 
-    override suspend fun searchTrackLyrics(clientId: String, track: Track): Feed<dev.brahmkshatriya.echo.common.models.Lyrics> {
-        val artistName = track.artists.firstOrNull()?.name ?: return emptyList<dev.brahmkshatriya.echo.common.models.Lyrics>().toFeed()
-        val lyricsText = try { withContext(Dispatchers.IO) { api.getLyrics(artistName, track.title) } } catch (_: Throwable) { null }
-
-        val lyricObj = try { lyricsText?.let { converter.toLyricFromText(it) } } catch (_: Throwable) { null }
-        val finalLyric = lyricObj ?: dev.brahmkshatriya.echo.common.models.Lyrics.Simple(converter.cleanPlainText(lyricsText ?: ""))
-
-        val lyrics = dev.brahmkshatriya.echo.common.models.Lyrics(
-            id = track.id,
-            title = track.title,
-            subtitle = artistName,
-            lyrics = finalLyric,
-            extras = mapOf("artistName" to artistName)
-        )
-        return listOf(lyrics).toFeed()
+        return listOf(
+            Lyrics(
+                id = "${track.id}_lyrics",
+                title = "Lyrics for ${track.title}",
+                subtitle = artist,
+                lyrics = convertedLyrics
+            )
+        ).toFeed()
     }
 }
