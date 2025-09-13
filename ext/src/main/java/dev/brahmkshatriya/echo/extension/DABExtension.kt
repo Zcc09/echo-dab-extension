@@ -113,8 +113,18 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     override suspend fun onInitialize() {
         val sessionCookie = settings.getString("session_cookie")
         if (sessionCookie != null && currentUser == null) {
-            currentUser = withContext(Dispatchers.IO) { runCatching { api.getMe() }.getOrNull() }
+            // Validate the session is still active
+            currentUser = withContext(Dispatchers.IO) {
+                runCatching {
+                    if (api.hasValidSession()) {
+                        api.getMe()
+                    } else {
+                        null
+                    }
+                }.getOrNull()
+            }
             if (currentUser == null) {
+                // Clear invalid session
                 settings.putString("session_cookie", null)
             }
         }
@@ -156,32 +166,56 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
     override fun setLoginUser(user: User?) {
         if (user == null) {
+            // Clear all session data and reset state
             settings.putString("session_cookie", null)
             currentUser = null
+            api.clearSession()
             try { api.shutdown() } catch (_: Throwable) { }
+        } else {
+            currentUser = user
         }
     }
 
     override suspend fun getCurrentUser(): User? {
-        if (currentUser == null) {
-            onInitialize()
+        // First check if we have a cached user and valid session
+        if (currentUser != null && api.hasValidSession()) {
+            return currentUser
         }
+
+        // Try to initialize from stored session
+        val sessionCookie = settings.getString("session_cookie")
+        if (!sessionCookie.isNullOrBlank()) {
+            currentUser = withContext(Dispatchers.IO) {
+                runCatching {
+                    if (api.hasValidSession()) {
+                        api.getMe()
+                    } else {
+                        null
+                    }
+                }.getOrNull()
+            }
+            if (currentUser == null) {
+                // Clear invalid session
+                settings.putString("session_cookie", null)
+            }
+        }
+
         return currentUser
     }
 
     // --- LibraryFeedClient ---
     override suspend fun loadLibraryFeed(): Feed<Shelf> {
-        val storedCookie = settings.getString("session_cookie")
-        if (storedCookie.isNullOrBlank()) throw ClientException.LoginRequired()
-
-        val me = try { withContext(Dispatchers.IO) { runCatching { api.getMe() }.getOrNull() } } catch (_: Throwable) { null }
-        if (me == null) {
-            settings.putString("session_cookie", null)
+        // Check authentication first
+        val user = getCurrentUser()
+        if (user == null || !api.hasValidSession()) {
             throw ClientException.LoginRequired()
         }
 
         return Feed(tabs) { tab ->
-            if (getCurrentUser() == null) throw ClientException.LoginRequired()
+            // Double-check authentication for each tab load
+            if (getCurrentUser() == null || !api.hasValidSession()) {
+                throw ClientException.LoginRequired()
+            }
 
             when (tab?.id) {
                 "all" -> {
@@ -205,6 +239,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 }
                 "playlists" -> {
                     val paged = PagedData.Single<Shelf> {
+                        if (!api.hasValidSession()) throw ClientException.LoginRequired()
                         val pls = try { withContext(Dispatchers.IO) { api.fetchLibraryPlaylistsPage(1, 50) } } catch (_: Throwable) { emptyList<Playlist>() }
                         if (pls.isEmpty()) emptyList() else pls.map { it.toShelf() }
                     }
@@ -212,18 +247,21 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 }
                 "albums" -> {
                     val paged = PagedData.Single<Shelf> {
+                        if (!api.hasValidSession()) throw ClientException.LoginRequired()
                         loadAlbumShelves() ?: emptyList()
                     }
                     Feed.Data(paged)
                 }
                 "artists" -> {
                     val paged = PagedData.Single<Shelf> {
+                        if (!api.hasValidSession()) throw ClientException.LoginRequired()
                         loadArtistShelves() ?: emptyList()
                     }
                     Feed.Data(paged)
                 }
                 "tracks" -> {
                     val paged = PagedData.Single<Shelf> {
+                        if (!api.hasValidSession()) throw ClientException.LoginRequired()
                         loadFavoritesShelves() ?: emptyList()
                     }
                     Feed.Data(paged, Feed.Buttons(showSearch = false, showSort = false, showPlayAndShuffle = true))
@@ -234,6 +272,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     }
 
     private suspend fun loadPlaylistShelves(): List<Shelf>? {
+        if (!api.hasValidSession()) return null
         val pls = try { withContext(Dispatchers.IO) { api.fetchLibraryPlaylistsPage(1, 50) } } catch (_: Throwable) { emptyList<Playlist>() }
         if (pls.isEmpty()) return null
 
@@ -254,6 +293,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     }
 
     private suspend fun loadAlbumShelves(): List<Shelf>? {
+        if (!api.hasValidSession()) return null
         val candidates = listOf(
             "https://dab.yeet.su/api/albums?page=1&limit=50",
             "https://dab.yeet.su/api/library/albums?page=1&limit=50",
@@ -265,6 +305,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     }
 
     private suspend fun loadArtistShelves(): List<Shelf>? {
+        if (!api.hasValidSession()) return null
         val candidates = listOf(
             "https://dab.yeet.su/api/artists?page=1&limit=50",
             "https://dab.yeet.su/api/library/artists?page=1&limit=50"
@@ -275,12 +316,14 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     }
 
     private suspend fun loadFavoritesShelves(): List<Shelf>? {
+        if (!api.hasValidSession()) return null
         val favs = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList<Track>() }
-        val finalFavs = if (favs.isEmpty()) try { withContext(Dispatchers.IO) { api.getFavorites() } } catch (_: Throwable) { emptyList<Track>() } else favs
-        return if (finalFavs.isEmpty()) null else listOf(Shelf.Lists.Tracks(id = "favorites_tracks", title = "Favorites", list = finalFavs))
+        return if (favs.isEmpty()) null else listOf(Shelf.Lists.Tracks(id = "favorites_tracks", title = "Favorites", list = favs))
     }
 
     private suspend fun probeEndpoints(candidates: List<String>): JsonElement? {
+        if (!api.hasValidSession()) return null
+
         for (url in candidates) {
             try {
                 val rb = okhttp3.Request.Builder().url(url)
@@ -293,7 +336,15 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
 
                 client.newCall(rb.build()).execute().use { resp ->
-                    if (!resp.isSuccessful) continue
+                    if (!resp.isSuccessful) {
+                        // Clear invalid session on auth errors
+                        if (resp.code == 401 || resp.code == 403) {
+                            settings.putString("session_cookie", null)
+                            currentUser = null
+                            api.clearSession()
+                        }
+                        continue
+                    }
                     val body = resp.body?.string() ?: continue
                     try {
                         return json.decodeFromString<JsonElement>(body)
@@ -355,8 +406,33 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     override suspend fun loadPlaylist(playlist: Playlist): Playlist = playlist
 
     override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
-        val tracks: PagedData<Track> = api.getPlaylistTracks(playlist, 1, 200)
-        return tracks.toFeed()
+        Log.d("DABExtension", "loadTracks called for playlist=${playlist.id}, title='${playlist.title}'")
+
+        try {
+            val tracks: PagedData<Track> = api.getPlaylistTracks(playlist, 1, 200)
+            val trackList = tracks.loadAll()
+            Log.d("DABExtension", "loadTracks returning ${trackList.size} tracks for playlist=${playlist.id}")
+
+            if (trackList.isEmpty()) {
+                Log.w("DABExtension", "No tracks found for playlist=${playlist.id}, attempting direct fetch")
+                // Try direct fetch as fallback
+                val directTracks = try {
+                    withContext(Dispatchers.IO) {
+                        api.fetchAllPlaylistTracks(playlist, 1000)
+                    }
+                } catch (e: Throwable) {
+                    Log.e("DABExtension", "Direct fetch failed for playlist=${playlist.id}: ${e.message}")
+                    emptyList()
+                }
+                Log.d("DABExtension", "Direct fetch returned ${directTracks.size} tracks for playlist=${playlist.id}")
+                return directTracks.toFeed()
+            }
+
+            return tracks.toFeed()
+        } catch (e: Throwable) {
+            Log.e("DABExtension", "Exception in loadTracks for playlist=${playlist.id}: ${e.message}", e)
+            return emptyList<Track>().toFeed()
+        }
     }
 
     override suspend fun loadFeed(playlist: Playlist): Feed<Shelf>? {

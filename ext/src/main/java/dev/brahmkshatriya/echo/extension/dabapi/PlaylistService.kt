@@ -35,52 +35,107 @@ class PlaylistService(
         return if (firstPart.contains('=')) firstPart else "session=$firstPart"
     }
 
+    // Check if user is logged in (has valid session cookie)
+    private fun isLoggedIn(): Boolean {
+        return !cookieHeaderValue().isNullOrBlank()
+    }
+
     fun getCachedTracksForPlaylist(playlistId: String): List<Track>? {
+        // Only return cached data if user is still logged in
+        if (!isLoggedIn()) {
+            playlistCache.clear() // Clear cache when logged out
+            return null
+        }
+
         val entry = playlistCache[playlistId] ?: return null
         return if (System.currentTimeMillis() - entry.first <= CACHE_TTL_MS) entry.second else null
     }
 
     suspend fun fetchTracksForPlaylistSync(playlist: Playlist, pageIndex: Int = 1, pageSize: Int = 1000): List<Track> {
         return withContext(Dispatchers.IO) {
+            // Require authentication for playlists
+            if (!isLoggedIn()) {
+                playlistCache.clear()
+                Log.d("PlaylistService", "Not logged in, returning empty tracks for playlist=${playlist.id}")
+                return@withContext emptyList()
+            }
+
             val now = System.currentTimeMillis()
             val cacheEntry = playlistCache[playlist.id]
             if (cacheEntry != null && now - cacheEntry.first <= CACHE_TTL_MS) {
+                Log.d("PlaylistService", "Returning cached ${cacheEntry.second.size} tracks for playlist=${playlist.id}")
                 return@withContext cacheEntry.second
             }
 
+            Log.d("PlaylistService", "Fetching tracks for playlist=${playlist.id}, title='${playlist.title}'")
+
+            // More comprehensive endpoint candidates with better prioritization
             val candidateUrls = listOf(
-                "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}",
+                // Try the most likely endpoints first
                 "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
                 "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
+                "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}",
                 "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}",
-                "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/items"
+                "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/items",
+                // Additional fallbacks
+                "https://dab.yeet.su/api/library/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
+                "https://dab.yeet.su/api/playlist/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks"
             )
 
-            val clientShort = httpClient.newBuilder().callTimeout(3000, TimeUnit.MILLISECONDS).build()
+            // Use longer timeout for more reliable fetching
+            val clientRobust = httpClient.newBuilder().callTimeout(10000, TimeUnit.MILLISECONDS).build()
 
-            for (url in candidateUrls) {
+            for ((index, url) in candidateUrls.withIndex()) {
                 try {
                     val requestUrl = if (url.contains('?')) "$url&page=$pageIndex&limit=$pageSize" else "$url?page=$pageIndex&limit=$pageSize"
+                    Log.d("PlaylistService", "Trying endpoint ${index + 1}/${candidateUrls.size}: $requestUrl")
+
                     val rb = okhttp3.Request.Builder().url(requestUrl)
                     val cookie = cookieHeaderValue()
                     if (!cookie.isNullOrBlank()) rb.header("Cookie", cookie)
                     rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
 
-                    clientShort.newCall(rb.build()).execute().use { resp ->
-                        if (!resp.isSuccessful) continue
-                        val body = resp.body?.string() ?: continue
+                    clientRobust.newCall(rb.build()).execute().use { resp ->
+                        Log.d("PlaylistService", "Response: ${resp.code} ${resp.message} for $requestUrl")
+
+                        if (!resp.isSuccessful) {
+                            // Clear invalid session on auth errors
+                            if (resp.code == 401 || resp.code == 403) {
+                                Log.w("PlaylistService", "Authentication failed, clearing session")
+                                settings.putString("session_cookie", null)
+                                playlistCache.clear()
+                                playlistsCache = null
+                            }
+                            Log.d("PlaylistService", "Request failed with ${resp.code}, trying next endpoint")
+                            continue
+                        }
+
+                        val body = resp.body?.string()
+                        if (body.isNullOrEmpty()) {
+                            Log.d("PlaylistService", "Empty response body, trying next endpoint")
+                            continue
+                        }
+
+                        Log.d("PlaylistService", "Response body length: ${body.length} chars")
+                        Log.v("PlaylistService", "Response body preview: ${body.take(200)}...")
 
                         val tracks = parseTracksFromBody(body)
+                        Log.d("PlaylistService", "Parsed ${tracks.size} tracks from response")
+
                         if (tracks.isNotEmpty()) {
                             playlistCache[playlist.id] = now to tracks
-                            Log.d("PlaylistService", "Found ${tracks.size} tracks for playlist=${playlist.id} from=$requestUrl")
+                            Log.i("PlaylistService", "SUCCESS: Found ${tracks.size} tracks for playlist=${playlist.id} from=$requestUrl")
                             return@withContext tracks
+                        } else {
+                            Log.d("PlaylistService", "No tracks found in response, trying next endpoint")
                         }
                     }
-                } catch (_: Throwable) { }
+                } catch (e: Throwable) {
+                    Log.w("PlaylistService", "Exception trying endpoint $url: ${e.message}")
+                }
             }
 
-            Log.d("PlaylistService", "No tracks found for playlist=${playlist.id}")
+            Log.w("PlaylistService", "FAILED: No tracks found for playlist=${playlist.id} after trying all endpoints")
             playlistCache[playlist.id] = now to emptyList()
             emptyList()
         }
@@ -93,7 +148,7 @@ class PlaylistService(
             return lib.tracks.mapNotNull { t -> try { converter.toTrack(t) } catch (_: Throwable) { null } }
         } catch (_: Throwable) { }
 
-        // Try generic JSON parsing
+        // Use enhanced JSON parsing (consolidated from ParserService)
         try {
             val root = json.parseToJsonElement(body)
             return parseTracksFromJsonElement(root)
@@ -102,45 +157,97 @@ class PlaylistService(
         return emptyList()
     }
 
+    // Enhanced JSON element parsing (integrated from ParserService, removing redundancy)
     private fun parseTracksFromJsonElement(root: kotlinx.serialization.json.JsonElement): List<Track> {
         val out = mutableListOf<Track>()
 
-        when (root) {
-            is JsonObject -> {
-                val candidates = listOf("tracks", "data", "items", "results", "favorites")
-                for (key in candidates) {
-                    val arr = root[key] as? JsonArray
-                    if (arr != null) {
-                        for (el in arr) {
-                            if (el is JsonObject) {
-                                try {
-                                    val dt = json.decodeFromJsonElement(dev.brahmkshatriya.echo.extension.models.DabTrack.serializer(), el)
-                                    out.add(converter.toTrack(dt))
-                                } catch (_: Throwable) { }
+        fun visit(el: kotlinx.serialization.json.JsonElement) {
+            when (el) {
+                is JsonObject -> {
+                    // Try direct track object parsing
+                    val direct = tryParseElementAsTrack(el)
+                    if (direct != null) {
+                        out.add(converter.toTrack(direct))
+                        return
+                    }
+
+                    // Check common array containers with expanded candidates
+                    val candidates = listOf("tracks", "data", "items", "results", "favorites", "library", "content")
+                    for (key in candidates) {
+                        val arr = el[key] as? JsonArray
+                        if (arr != null) {
+                            for (item in arr) {
+                                if (item is JsonObject) {
+                                    val parsed = tryParseElementAsTrack(item)
+                                    if (parsed != null) out.add(converter.toTrack(parsed))
+                                }
                             }
+                            if (out.isNotEmpty()) return
                         }
-                        if (out.isNotEmpty()) break
                     }
                 }
-            }
-            is JsonArray -> {
-                for (item in root) {
-                    if (item is JsonObject) {
-                        try {
-                            val dt = json.decodeFromJsonElement(dev.brahmkshatriya.echo.extension.models.DabTrack.serializer(), item)
-                            out.add(converter.toTrack(dt))
-                        } catch (_: Throwable) { }
+                is JsonArray -> {
+                    for (item in el) {
+                        if (item is JsonObject) {
+                            val parsed = tryParseElementAsTrack(item)
+                            if (parsed != null) out.add(converter.toTrack(parsed))
+                        }
                     }
                 }
-            }
-            else -> {
-                // Handle JsonLiteral, JsonNull and other cases
+                else -> { /* Handle other types if needed */ }
             }
         }
+
+        try { visit(root) } catch (_: Throwable) { }
         return out
     }
 
+    // Enhanced track parsing (removing duplicate logic)
+    private fun tryParseElementAsTrack(el: JsonObject): dev.brahmkshatriya.echo.extension.models.DabTrack? {
+        return try {
+            json.decodeFromJsonElement(dev.brahmkshatriya.echo.extension.models.DabTrack.serializer(), el)
+        } catch (_: Throwable) {
+            // Enhanced manual fallback with more field variations
+            val idEl = el["id"] ?: el["trackId"] ?: el["track_id"] ?: el["track"] ?: return null
+            val idStr = (idEl as? JsonPrimitive)?.content ?: idEl.toString()
+            val idInt = idStr.toIntOrNull() ?: return null
+
+            val title = (el["title"] as? JsonPrimitive)?.content
+                ?: (el["name"] as? JsonPrimitive)?.content ?: ""
+            val artist = (el["artist"] as? JsonPrimitive)?.content
+                ?: (el["artistName"] as? JsonPrimitive)?.content ?: ""
+            val artistId = (el["artistId"] as? JsonPrimitive)?.content?.toIntOrNull()
+            val albumTitle = (el["albumTitle"] as? JsonPrimitive)?.content
+                ?: (el["album"] as? JsonPrimitive)?.content
+            val albumCover = (el["albumCover"] as? JsonPrimitive)?.content
+            val albumId = (el["albumId"] as? JsonPrimitive)?.content
+            val releaseDate = (el["releaseDate"] as? JsonPrimitive)?.content
+            val genre = (el["genre"] as? JsonPrimitive)?.content
+            val duration = (el["duration"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
+
+            dev.brahmkshatriya.echo.extension.models.DabTrack(
+                id = idInt,
+                title = title,
+                artist = artist,
+                artistId = artistId,
+                albumTitle = albumTitle,
+                albumCover = albumCover,
+                albumId = albumId,
+                releaseDate = releaseDate,
+                genre = genre,
+                duration = duration,
+                audioQuality = null
+            )
+        }
+    }
+
     fun fetchLibraryPlaylistsPage(pageIndex: Int = 1, pageSize: Int = 50, includeCovers: Boolean = true): List<Playlist> {
+        // Require authentication for playlists
+        if (!isLoggedIn()) {
+            playlistsCache = null
+            return emptyList()
+        }
+
         val now = System.currentTimeMillis()
         val cached = playlistsCache
         if (cached != null && now - cached.first <= PLAYLISTS_CACHE_TTL_MS) return cached.second
@@ -159,7 +266,15 @@ class PlaylistService(
                 rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
 
                 httpClient.newCall(rb.build()).execute().use { resp ->
-                    if (!resp.isSuccessful) continue
+                    if (!resp.isSuccessful) {
+                        // Clear invalid session on auth errors
+                        if (resp.code == 401 || resp.code == 403) {
+                            settings.putString("session_cookie", null)
+                            playlistsCache = null
+                            playlistCache.clear()
+                        }
+                        continue
+                    }
                     val body = resp.body?.string() ?: continue
 
                     val playlists = parsePlaylistsFromBody(body)

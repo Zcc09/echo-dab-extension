@@ -44,6 +44,11 @@ class DABApi(
     private val playlistService: PlaylistService by lazy { PlaylistService(httpClient, json, converter, settings) }
     private val favoritesService: FavoritesService by lazy { FavoritesService(httpClient, json, settings, converter) }
 
+    // Session validation cache
+    private var lastSessionCheck: Long = 0
+    private var isSessionValid: Boolean = false
+    private val SESSION_CHECK_INTERVAL = 5 * 60 * 1000L // 5 minutes
+
     init {
         try { streamResolver.loadPersistentStreamCache() } catch (_: Throwable) { /* best-effort */ }
     }
@@ -58,6 +63,42 @@ class DABApi(
         val firstPart = raw.split(';').firstOrNull()?.trim() ?: return null
         if (firstPart.isEmpty()) return null
         return if (firstPart.contains('=')) firstPart else "session=$firstPart"
+    }
+
+    // Check if we have a valid session cookie
+    fun hasValidSession(): Boolean {
+        val cookie = cookieHeaderValue()
+        if (cookie.isNullOrBlank()) return false
+
+        val now = System.currentTimeMillis()
+        if (now - lastSessionCheck < SESSION_CHECK_INTERVAL && isSessionValid) {
+            return true
+        }
+
+        // Validate session by calling /auth/me
+        try {
+            val response: DabUserResponse = executeAuthenticated("https://dab.yeet.su/api/auth/me")
+            isSessionValid = response.user != null
+            lastSessionCheck = now
+
+            if (!isSessionValid) {
+                // Clear invalid session
+                clearSession()
+            }
+
+            return isSessionValid
+        } catch (_: Throwable) {
+            isSessionValid = false
+            clearSession()
+            return false
+        }
+    }
+
+    // Clear session data
+    fun clearSession() {
+        settings.putString("session_cookie", null)
+        isSessionValid = false
+        lastSessionCheck = 0
     }
 
     // Helper to create a Request.Builder with standard headers and optional cookie
@@ -83,6 +124,9 @@ class DABApi(
                 val sessionCookie = cookieHeader.split(';').firstOrNull { it.trim().startsWith("session=") }
                 if (sessionCookie != null) {
                     settings.putString("session_cookie", sessionCookie)
+                    // Reset session validation cache
+                    isSessionValid = true
+                    lastSessionCheck = System.currentTimeMillis()
                 }
             }
 
@@ -101,6 +145,10 @@ class DABApi(
         httpClient.newCall(req).execute().use { response ->
             val body = response.body?.string() ?: error("Empty response body")
             if (!response.isSuccessful) {
+                // If unauthorized, clear session
+                if (response.code == 401 || response.code == 403) {
+                    clearSession()
+                }
                 error("API Error: ${response.code} ${response.message} - $body")
             }
             return json.decodeFromString(body)
@@ -108,6 +156,9 @@ class DABApi(
     }
 
     fun getMe(): User {
+        if (!hasValidSession()) {
+            error("No valid session")
+        }
         val response: DabUserResponse = executeAuthenticated("https://dab.yeet.su/api/auth/me")
         return converter.toUser(response.user ?: error("User data is null"))
     }
@@ -221,75 +272,181 @@ class DABApi(
 
     suspend fun fetchAllPlaylistTracks(playlist: Playlist, pageSize: Int = 1000): List<Track> {
         return try {
+            Log.d("DABApi", "fetchAllPlaylistTracks called for playlist=${playlist.id}, title='${playlist.title}'")
+
             val fromService = playlistService.fetchTracksForPlaylistSync(playlist, 1, pageSize)
-            if (fromService.isNotEmpty() && fromService.size >= pageSize) {
+            Log.d("DABApi", "PlaylistService returned ${fromService.size} tracks for playlist=${playlist.id}")
+
+            if (fromService.isNotEmpty()) {
+                Log.i("DABApi", "SUCCESS: Using ${fromService.size} tracks from PlaylistService for playlist=${playlist.id}")
                 return fromService
             }
+
+            Log.d("DABApi", "PlaylistService returned empty, trying fallback API endpoints for playlist=${playlist.id}")
 
             withContext(Dispatchers.IO) {
                 val out = mutableListOf<Track>()
                 val candidateBasePaths = listOf(
-                    "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}",
                     "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
                     "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
+                    "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}",
                     "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}",
-                    "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/items"
+                    "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/items",
+                    // Additional fallbacks
+                    "https://dab.yeet.su/api/library/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
+                    "https://dab.yeet.su/api/playlist/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks"
                 )
 
-                for (base in candidateBasePaths) {
+                for ((index, base) in candidateBasePaths.withIndex()) {
                     try {
+                        Log.d("DABApi", "Trying fallback endpoint ${index + 1}/${candidateBasePaths.size}: $base")
+
                         var page = 1
                         var totalFetched = 0
+                        var consecutiveEmptyPages = 0
+                        val maxEmptyPages = 2
+
                         while (true) {
                             val url = "$base?page=$page&limit=$pageSize"
                             val rb = Request.Builder().url(url)
                             val cookie = cookieHeaderValue()
                             if (!cookie.isNullOrBlank()) rb.header("Cookie", cookie)
                             rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
+
                             httpClient.newCall(rb.build()).execute().use { resp ->
-                                if (!resp.isSuccessful) break
-                                val body = resp.body?.string() ?: break
+                                Log.d("DABApi", "Fallback response: ${resp.code} ${resp.message} for $url")
+
+                                if (!resp.isSuccessful) {
+                                    Log.d("DABApi", "Fallback request failed with ${resp.code}, breaking")
+                                    break
+                                }
+
+                                val body = resp.body?.string()
+                                if (body.isNullOrEmpty()) {
+                                    Log.d("DABApi", "Empty response body, breaking")
+                                    break
+                                }
+
+                                Log.d("DABApi", "Response body length: ${body.length} chars")
+
                                 try {
                                     val root = json.parseToJsonElement(body)
                                     val parsed = parseTracksFromResponse(root)
+                                    Log.d("DABApi", "Parsed ${parsed.size} tracks from fallback response")
 
-                                    if (parsed.isEmpty()) break
-                                    out.addAll(parsed)
-                                    totalFetched += parsed.size
-
-                                    if (parsed.size >= pageSize) {
-                                        page++
+                                    if (parsed.isEmpty()) {
+                                        consecutiveEmptyPages++
+                                        if (consecutiveEmptyPages >= maxEmptyPages) {
+                                            Log.d("DABApi", "Too many consecutive empty pages, breaking")
+                                            break
+                                        }
                                     } else {
-                                        break
+                                        consecutiveEmptyPages = 0
+                                        out.addAll(parsed)
+                                        totalFetched += parsed.size
                                     }
-                                } catch (_: Throwable) { break }
+
+                                    if (parsed.size < pageSize) {
+                                        Log.d("DABApi", "Received fewer tracks than requested, assuming last page")
+                                        break
+                                    } else {
+                                        page++
+                                    }
+                                } catch (e: Throwable) {
+                                    Log.w("DABApi", "Exception parsing response from $url: ${e.message}")
+                                    break
+                                }
                             }
                         }
-                        Log.d("DABApi", "Fetched $totalFetched total tracks for playlist ${playlist.id} from $base")
-                    } catch (_: Throwable) { /* next candidate */ }
-                    if (out.isNotEmpty()) return@withContext out
+
+                        if (totalFetched > 0) {
+                            Log.i("DABApi", "SUCCESS: Fetched $totalFetched total tracks for playlist ${playlist.id} from fallback $base")
+                            return@withContext out
+                        } else {
+                            Log.d("DABApi", "No tracks found from fallback endpoint $base")
+                        }
+                    } catch (e: Throwable) {
+                        Log.w("DABApi", "Exception trying fallback endpoint $base: ${e.message}")
+                    }
                 }
+
+                Log.w("DABApi", "FAILED: No tracks found for playlist=${playlist.id} from any fallback endpoint")
                 out
             }
-        } catch (_: Throwable) { emptyList() }
+        } catch (e: Throwable) {
+            Log.e("DABApi", "Exception in fetchAllPlaylistTracks for playlist=${playlist.id}: ${e.message}", e)
+            emptyList()
+        }
+    }
+
+    // Consolidated manual track parsing (removing redundancy across services)
+    private fun tryParseManualTrack(el: JsonObject): DabTrack? {
+        return try {
+            val idEl = el["id"] ?: el["trackId"] ?: el["track_id"] ?: el["track"] ?: return null
+            val idStr = (idEl as? JsonPrimitive)?.content ?: idEl.toString()
+            val idInt = idStr.toIntOrNull() ?: return null
+
+            val title = (el["title"] as? JsonPrimitive)?.content
+                ?: (el["name"] as? JsonPrimitive)?.content ?: ""
+            val artist = (el["artist"] as? JsonPrimitive)?.content
+                ?: (el["artistName"] as? JsonPrimitive)?.content ?: ""
+            val artistId = (el["artistId"] as? JsonPrimitive)?.content?.toIntOrNull()
+            val albumTitle = (el["albumTitle"] as? JsonPrimitive)?.content
+                ?: (el["album"] as? JsonPrimitive)?.content
+            val albumCover = (el["albumCover"] as? JsonPrimitive)?.content
+            val albumId = (el["albumId"] as? JsonPrimitive)?.content
+            val releaseDate = (el["releaseDate"] as? JsonPrimitive)?.content
+            val genre = (el["genre"] as? JsonPrimitive)?.content
+            val duration = (el["duration"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
+
+            DabTrack(
+                id = idInt,
+                title = title,
+                artist = artist,
+                artistId = artistId,
+                albumTitle = albumTitle,
+                albumCover = albumCover,
+                albumId = albumId,
+                releaseDate = releaseDate,
+                genre = genre,
+                duration = duration,
+                audioQuality = null
+            )
+        } catch (_: Throwable) { null }
     }
 
     private fun parseTracksFromResponse(root: JsonElement): List<Track> {
         val parsed = mutableListOf<Track>()
 
-        if (root is JsonObject) {
-            val arr = (root["tracks"] as? JsonArray) ?: (root["data"] as? JsonArray) ?: (root["items"] as? JsonArray) ?: (root["results"] as? JsonArray)
-            if (arr != null) {
-                for (el in arr) if (el is JsonObject) try {
-                    val dt = json.decodeFromJsonElement(DabTrack.serializer(), el)
-                    converter.toTrack(dt).let { parsed.add(it) }
-                } catch (_: Throwable) { }
+        when (root) {
+            is JsonObject -> {
+                val candidates = listOf("tracks", "data", "items", "results", "favorites", "library", "content")
+                for (key in candidates) {
+                    val arr = root[key] as? JsonArray
+                    if (arr != null) {
+                        for (el in arr) if (el is JsonObject) try {
+                            val dt = json.decodeFromJsonElement(DabTrack.serializer(), el)
+                            parsed.add(converter.toTrack(dt))
+                        } catch (_: Throwable) {
+                            // Try enhanced manual parsing as fallback
+                            val track = tryParseManualTrack(el)
+                            if (track != null) parsed.add(converter.toTrack(track))
+                        }
+                        if (parsed.isNotEmpty()) break
+                    }
+                }
             }
-        } else if (root is JsonArray) {
-            for (el in root) if (el is JsonObject) try {
-                val dt = json.decodeFromJsonElement(DabTrack.serializer(), el)
-                converter.toTrack(dt).let { parsed.add(it) }
-            } catch (_: Throwable) { }
+            is JsonArray -> {
+                for (el in root) if (el is JsonObject) try {
+                    val dt = json.decodeFromJsonElement(DabTrack.serializer(), el)
+                    parsed.add(converter.toTrack(dt))
+                } catch (_: Throwable) {
+                    // Try enhanced manual parsing as fallback
+                    val track = tryParseManualTrack(el)
+                    if (track != null) parsed.add(converter.toTrack(track))
+                }
+            }
+            else -> { /* other types */ }
         }
         return parsed
     }
@@ -337,5 +494,74 @@ class DABApi(
                 } catch (_: Throwable) { emptyList() }
             }
         } catch (_: Throwable) { emptyList() }
+    }
+
+    // Add a debug helper method to diagnose playlist issues
+    suspend fun debugPlaylistIssues(playlist: Playlist): String {
+        val debug = StringBuilder()
+        debug.appendLine("=== PLAYLIST DEBUG INFO ===")
+        debug.appendLine("Playlist ID: ${playlist.id}")
+        debug.appendLine("Playlist Title: ${playlist.title}")
+        debug.appendLine("Track Count: ${playlist.trackCount}")
+
+        // Check session validity
+        val hasSession = hasValidSession()
+        debug.appendLine("Has Valid Session: $hasSession")
+
+        if (!hasSession) {
+            debug.appendLine("ERROR: No valid session - user needs to login")
+            return debug.toString()
+        }
+
+        // Check cookie
+        val cookie = cookieHeaderValue()
+        debug.appendLine("Session Cookie Present: ${!cookie.isNullOrBlank()}")
+
+        // Try each endpoint manually
+        val endpoints = listOf(
+            "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
+            "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
+            "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}",
+            "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}"
+        )
+
+        for ((index, url) in endpoints.withIndex()) {
+            try {
+                val rb = Request.Builder().url(url)
+                if (!cookie.isNullOrBlank()) rb.header("Cookie", cookie)
+                rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
+
+                httpClient.newCall(rb.build()).execute().use { resp ->
+                    debug.appendLine("Endpoint ${index + 1}: $url")
+                    debug.appendLine("  Response: ${resp.code} ${resp.message}")
+
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string()
+                        debug.appendLine("  Body Length: ${body?.length ?: 0} chars")
+
+                        if (!body.isNullOrEmpty()) {
+                            try {
+                                val root = json.parseToJsonElement(body)
+                                val tracks = parseTracksFromResponse(root)
+                                debug.appendLine("  Parsed Tracks: ${tracks.size}")
+                                if (tracks.isNotEmpty()) {
+                                    debug.appendLine("  FOUND TRACKS - This endpoint works!")
+                                    debug.appendLine("  Sample track: ${tracks.first().title} by ${tracks.first().artists.firstOrNull()?.name}")
+                                }
+                            } catch (e: Throwable) {
+                                debug.appendLine("  Parse Error: ${e.message}")
+                                debug.appendLine("  Body Preview: ${body.take(200)}")
+                            }
+                        }
+                    } else {
+                        debug.appendLine("  ERROR: Request failed")
+                    }
+                }
+            } catch (e: Throwable) {
+                debug.appendLine("Endpoint ${index + 1}: EXCEPTION - ${e.message}")
+            }
+        }
+
+        return debug.toString()
     }
 }
