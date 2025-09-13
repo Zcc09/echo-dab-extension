@@ -282,96 +282,66 @@ class DABApi(
                 return fromService
             }
 
-            Log.d("DABApi", "PlaylistService returned empty, trying fallback API endpoints for playlist=${playlist.id}")
+            Log.d("DABApi", "PlaylistService returned empty, trying direct API call for playlist=${playlist.id}")
 
+            // Use correct DAB API endpoint according to specification
             withContext(Dispatchers.IO) {
-                val out = mutableListOf<Track>()
-                val candidateBasePaths = listOf(
-                    "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
-                    "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
-                    "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}",
-                    "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}",
-                    "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/items",
-                    // Additional fallbacks
-                    "https://dab.yeet.su/api/library/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
-                    "https://dab.yeet.su/api/playlist/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks"
-                )
+                try {
+                    val correctEndpoint = "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}"
+                    val url = "$correctEndpoint?page=1&limit=$pageSize"
 
-                for ((index, base) in candidateBasePaths.withIndex()) {
-                    try {
-                        Log.d("DABApi", "Trying fallback endpoint ${index + 1}/${candidateBasePaths.size}: $base")
+                    Log.d("DABApi", "Trying direct API call: $url")
 
-                        var page = 1
-                        var totalFetched = 0
-                        var consecutiveEmptyPages = 0
-                        val maxEmptyPages = 2
+                    val rb = Request.Builder().url(url)
+                    val cookie = cookieHeaderValue()
+                    if (!cookie.isNullOrBlank()) rb.header("Cookie", cookie)
+                    rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
 
-                        while (true) {
-                            val url = "$base?page=$page&limit=$pageSize"
-                            val rb = Request.Builder().url(url)
-                            val cookie = cookieHeaderValue()
-                            if (!cookie.isNullOrBlank()) rb.header("Cookie", cookie)
-                            rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
+                    httpClient.newCall(rb.build()).execute().use { resp ->
+                        Log.d("DABApi", "Direct API response: ${resp.code} ${resp.message} for $url")
 
-                            httpClient.newCall(rb.build()).execute().use { resp ->
-                                Log.d("DABApi", "Fallback response: ${resp.code} ${resp.message} for $url")
+                        if (!resp.isSuccessful) {
+                            Log.w("DABApi", "Direct API request failed with ${resp.code}")
+                            return@withContext emptyList()
+                        }
 
-                                if (!resp.isSuccessful) {
-                                    Log.d("DABApi", "Fallback request failed with ${resp.code}, breaking")
-                                    break
-                                }
+                        val body = resp.body?.string()
+                        if (body.isNullOrEmpty()) {
+                            Log.w("DABApi", "Empty response body from direct API")
+                            return@withContext emptyList()
+                        }
 
-                                val body = resp.body?.string()
-                                if (body.isNullOrEmpty()) {
-                                    Log.d("DABApi", "Empty response body, breaking")
-                                    break
-                                }
+                        Log.d("DABApi", "Response body length: ${body.length} chars")
 
-                                Log.d("DABApi", "Response body length: ${body.length} chars")
+                        try {
+                            // Parse using correct DAB API response format
+                            val response = json.decodeFromString<dev.brahmkshatriya.echo.extension.models.DabLibraryResponse>(body)
+                            val tracks = response.library?.tracks?.mapNotNull { track ->
+                                try { converter.toTrack(track) } catch (_: Throwable) { null }
+                            } ?: emptyList()
 
-                                try {
-                                    val root = json.parseToJsonElement(body)
-                                    val parsed = parseTracksFromResponse(root)
-                                    Log.d("DABApi", "Parsed ${parsed.size} tracks from fallback response")
+                            Log.d("DABApi", "Parsed ${tracks.size} tracks from direct API response")
 
-                                    if (parsed.isEmpty()) {
-                                        consecutiveEmptyPages++
-                                        if (consecutiveEmptyPages >= maxEmptyPages) {
-                                            Log.d("DABApi", "Too many consecutive empty pages, breaking")
-                                            break
-                                        }
-                                    } else {
-                                        consecutiveEmptyPages = 0
-                                        out.addAll(parsed)
-                                        totalFetched += parsed.size
-                                    }
-
-                                    if (parsed.size < pageSize) {
-                                        Log.d("DABApi", "Received fewer tracks than requested, assuming last page")
-                                        break
-                                    } else {
-                                        page++
-                                    }
-                                } catch (e: Throwable) {
-                                    Log.w("DABApi", "Exception parsing response from $url: ${e.message}")
-                                    break
-                                }
+                            if (tracks.isNotEmpty()) {
+                                Log.i("DABApi", "SUCCESS: Fetched ${tracks.size} tracks for playlist ${playlist.id} from direct API")
+                                return@withContext tracks
+                            }
+                        } catch (e: Throwable) {
+                            Log.w("DABApi", "Exception parsing direct API response: ${e.message}")
+                            // Try fallback parsing
+                            val fallbackTracks = parseTracksFromResponse(json.parseToJsonElement(body))
+                            if (fallbackTracks.isNotEmpty()) {
+                                Log.i("DABApi", "SUCCESS: Parsed ${fallbackTracks.size} tracks using fallback parser")
+                                return@withContext fallbackTracks
                             }
                         }
-
-                        if (totalFetched > 0) {
-                            Log.i("DABApi", "SUCCESS: Fetched $totalFetched total tracks for playlist ${playlist.id} from fallback $base")
-                            return@withContext out
-                        } else {
-                            Log.d("DABApi", "No tracks found from fallback endpoint $base")
-                        }
-                    } catch (e: Throwable) {
-                        Log.w("DABApi", "Exception trying fallback endpoint $base: ${e.message}")
                     }
+                } catch (e: Throwable) {
+                    Log.w("DABApi", "Exception in direct API call: ${e.message}")
                 }
 
-                Log.w("DABApi", "FAILED: No tracks found for playlist=${playlist.id} from any fallback endpoint")
-                out
+                Log.w("DABApi", "FAILED: No tracks found for playlist=${playlist.id}")
+                emptyList()
             }
         } catch (e: Throwable) {
             Log.e("DABApi", "Exception in fetchAllPlaylistTracks for playlist=${playlist.id}: ${e.message}", e)

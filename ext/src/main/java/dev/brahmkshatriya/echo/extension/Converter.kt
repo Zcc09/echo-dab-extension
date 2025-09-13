@@ -41,7 +41,6 @@ class Converter {
         )
     }
 
-    @Suppress("unused")
     fun toPlaylist(playlist: DabPlaylist): Playlist {
         return Playlist(
             id = playlist.id,

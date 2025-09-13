@@ -69,76 +69,79 @@ class PlaylistService(
 
             Log.d("PlaylistService", "Fetching tracks for playlist=${playlist.id}, title='${playlist.title}'")
 
-            // More comprehensive endpoint candidates with better prioritization
-            val candidateUrls = listOf(
-                // Try the most likely endpoints first
-                "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
-                "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
-                "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}",
-                "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}",
-                "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/items",
-                // Additional fallbacks
-                "https://dab.yeet.su/api/library/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
-                "https://dab.yeet.su/api/playlist/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks"
-            )
+            // Use correct API endpoint according to DAB API spec: /libraries/{id}
+            val correctEndpoint = "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}"
+            val requestUrl = "$correctEndpoint?page=$pageIndex&limit=$pageSize"
 
             // Use longer timeout for more reliable fetching
             val clientRobust = httpClient.newBuilder().callTimeout(10000, TimeUnit.MILLISECONDS).build()
 
-            for ((index, url) in candidateUrls.withIndex()) {
-                try {
-                    val requestUrl = if (url.contains('?')) "$url&page=$pageIndex&limit=$pageSize" else "$url?page=$pageIndex&limit=$pageSize"
-                    Log.d("PlaylistService", "Trying endpoint ${index + 1}/${candidateUrls.size}: $requestUrl")
+            try {
+                Log.d("PlaylistService", "Using correct API endpoint: $requestUrl")
 
-                    val rb = okhttp3.Request.Builder().url(requestUrl)
-                    val cookie = cookieHeaderValue()
-                    if (!cookie.isNullOrBlank()) rb.header("Cookie", cookie)
-                    rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
+                val rb = okhttp3.Request.Builder().url(requestUrl)
+                val cookie = cookieHeaderValue()
+                if (!cookie.isNullOrBlank()) rb.header("Cookie", cookie)
+                rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
 
-                    clientRobust.newCall(rb.build()).execute().use { resp ->
-                        Log.d("PlaylistService", "Response: ${resp.code} ${resp.message} for $requestUrl")
+                clientRobust.newCall(rb.build()).execute().use { resp ->
+                    Log.d("PlaylistService", "Response: ${resp.code} ${resp.message} for $requestUrl")
 
-                        if (!resp.isSuccessful) {
-                            // Clear invalid session on auth errors
-                            if (resp.code == 401 || resp.code == 403) {
-                                Log.w("PlaylistService", "Authentication failed, clearing session")
-                                settings.putString("session_cookie", null)
-                                playlistCache.clear()
-                                playlistsCache = null
-                            }
-                            Log.d("PlaylistService", "Request failed with ${resp.code}, trying next endpoint")
-                            continue
+                    if (!resp.isSuccessful) {
+                        // Clear invalid session on auth errors
+                        if (resp.code == 401 || resp.code == 403) {
+                            Log.w("PlaylistService", "Authentication failed, clearing session")
+                            settings.putString("session_cookie", null)
+                            playlistCache.clear()
+                            playlistsCache = null
                         }
-
-                        val body = resp.body?.string()
-                        if (body.isNullOrEmpty()) {
-                            Log.d("PlaylistService", "Empty response body, trying next endpoint")
-                            continue
-                        }
-
-                        Log.d("PlaylistService", "Response body length: ${body.length} chars")
-                        Log.v("PlaylistService", "Response body preview: ${body.take(200)}...")
-
-                        val tracks = parseTracksFromBody(body)
-                        Log.d("PlaylistService", "Parsed ${tracks.size} tracks from response")
-
-                        if (tracks.isNotEmpty()) {
-                            playlistCache[playlist.id] = now to tracks
-                            Log.i("PlaylistService", "SUCCESS: Found ${tracks.size} tracks for playlist=${playlist.id} from=$requestUrl")
-                            return@withContext tracks
-                        } else {
-                            Log.d("PlaylistService", "No tracks found in response, trying next endpoint")
-                        }
+                        Log.w("PlaylistService", "Request failed with ${resp.code}")
+                        return@withContext emptyList()
                     }
-                } catch (e: Throwable) {
-                    Log.w("PlaylistService", "Exception trying endpoint $url: ${e.message}")
+
+                    val body = resp.body?.string()
+                    if (body.isNullOrEmpty()) {
+                        Log.d("PlaylistService", "Empty response body")
+                        return@withContext emptyList()
+                    }
+
+                    Log.d("PlaylistService", "Response body length: ${body.length} chars")
+                    Log.v("PlaylistService", "Response body preview: ${body.take(200)}...")
+
+                    val tracks = parseLibraryResponse(body)
+                    Log.d("PlaylistService", "Parsed ${tracks.size} tracks from response")
+
+                    if (tracks.isNotEmpty()) {
+                        playlistCache[playlist.id] = now to tracks
+                        Log.i("PlaylistService", "SUCCESS: Found ${tracks.size} tracks for playlist=${playlist.id}")
+                        return@withContext tracks
+                    }
                 }
+            } catch (e: Throwable) {
+                Log.w("PlaylistService", "Exception calling correct endpoint: ${e.message}")
             }
 
-            Log.w("PlaylistService", "FAILED: No tracks found for playlist=${playlist.id} after trying all endpoints")
+            Log.w("PlaylistService", "FAILED: No tracks found for playlist=${playlist.id}")
             playlistCache[playlist.id] = now to emptyList()
             emptyList()
         }
+    }
+
+    private fun parseLibraryResponse(body: String): List<Track> {
+        // Try correct DAB API response format first
+        try {
+            val response: dev.brahmkshatriya.echo.extension.models.DabLibraryResponse = json.decodeFromString(body)
+            response.library?.tracks?.let { tracks ->
+                return tracks.mapNotNull { track ->
+                    try { converter.toTrack(track) } catch (_: Throwable) { null }
+                }
+            }
+        } catch (e: Throwable) {
+            Log.d("PlaylistService", "Failed to parse as DabLibraryResponse: ${e.message}")
+        }
+
+        // Fallback to legacy parsing
+        return parseTracksFromBody(body)
     }
 
     private fun parseTracksFromBody(body: String): List<Track> {

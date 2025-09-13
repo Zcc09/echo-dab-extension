@@ -57,7 +57,23 @@ class FavoritesService(
 
     // Centralized JSON parsing method that combines logic from ParserService
     private fun parseTracksFromJson(body: String): List<Track> {
-        // Try typed decode first
+        // Try correct DAB API response format first - favorites should return { favorites: [...] }
+        try {
+            val root = json.parseToJsonElement(body)
+            if (root is JsonObject && root["favorites"] is JsonArray) {
+                val favoritesArray = root["favorites"] as JsonArray
+                return favoritesArray.mapNotNull { el ->
+                    if (el is JsonObject) {
+                        try {
+                            val track = json.decodeFromJsonElement(dev.brahmkshatriya.echo.extension.models.DabTrack.serializer(), el)
+                            converter.toTrack(track)
+                        } catch (_: Throwable) { null }
+                    } else null
+                }
+            }
+        } catch (_: Throwable) { }
+
+        // Try typed decode for legacy format
         try {
             val trackResponse: dev.brahmkshatriya.echo.extension.models.DabTrackResponse = json.decodeFromString(body)
             return trackResponse.tracks.map { converter.toTrack(it) }

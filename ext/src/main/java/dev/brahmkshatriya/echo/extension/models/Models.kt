@@ -103,3 +103,24 @@ data class DabArtist(
 data class DabLyricsResponse(
     val lyrics: String?
 )
+
+@Serializable
+data class DabLibraryResponse(
+    val library: DabLibraryData? = null
+)
+
+@Serializable
+data class DabLibraryData(
+    val id: String,
+    val name: String,
+    val description: String? = null,
+    val isPublic: Boolean = false,
+    val trackCount: Int = 0,
+    val tracks: List<DabTrack> = emptyList(),
+    val pagination: DabPagination? = null
+)
+
+@Serializable
+data class DabLibrariesResponse(
+    val libraries: List<DabLibraryData> = emptyList()
+)
