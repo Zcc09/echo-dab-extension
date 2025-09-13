@@ -35,15 +35,15 @@ data class DabTrackResponse(
 data class DabTrack(
     val id: Int,
     val title: String,
-    val artist: String,
-    val artistId: Int?,
-    val albumTitle: String?,
-    val albumCover: String?,
-    val albumId: String?,
-    val releaseDate: String?,
-    val genre: String?,
-    val duration: Int,
-    val audioQuality: DabAudioQuality?
+    val artist: String = "",
+    val artistId: Int? = null,
+    val albumTitle: String? = null,
+    val albumCover: String? = null,
+    val albumId: String? = null,
+    val releaseDate: String? = null,
+    val genre: String? = null,
+    val duration: Int = 0,
+    val audioQuality: DabAudioQuality? = null
 )
 
 
@@ -83,11 +83,11 @@ data class DabSingleAlbumResponse(
 data class DabAlbum(
     val id: String,
     val title: String,
-    val artist: String,
-    val artistId: Int?,
-    val cover: String?,
-    val releaseDate: String?,
-    val trackCount: Int,
+    val artist: String = "",
+    val artistId: Int? = null,
+    val cover: String? = null,
+    val releaseDate: String? = null,
+    val trackCount: Int = 0,
     val tracks: List<DabTrack>? = null
 )
 

@@ -65,7 +65,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 } else {
                     val maxAttempts = 3
                     var lastResult = false
-                    for (attemptNum in 1..maxAttempts) {
+                    for (attempt in 1..maxAttempts) {
                         try {
                             api.removeFavorite(trackId)
                             delay(300L)
@@ -329,7 +329,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         }
     }
 
-    private suspend fun loadAlbumShelves(): List<Shelf>? {
+    private fun loadAlbumShelves(): List<Shelf>? {
         if (!api.hasValidSession()) return null
         val candidates = listOf(
             "https://dab.yeet.su/api/albums?page=1&limit=50",
@@ -341,7 +341,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         return if (albums.isEmpty()) null else listOf(Shelf.Lists.Items(id = "my_albums", title = "Albums", list = albums, type = Shelf.Lists.Type.Grid))
     }
 
-    private suspend fun loadArtistShelves(): List<Shelf>? {
+    private fun loadArtistShelves(): List<Shelf>? {
         if (!api.hasValidSession()) return null
         val candidates = listOf(
             "https://dab.yeet.su/api/artists?page=1&limit=50",
@@ -446,7 +446,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         Log.d("DABExtension", "loadTracks called for playlist=${playlist.id}, title='${playlist.title}'")
 
         try {
-            val tracks: PagedData<Track> = api.getPlaylistTracks(playlist, 1, 200)
+            val tracks: PagedData<Track> = api.getPlaylistTracks(playlist, 200)
             val trackList = tracks.loadAll()
             Log.d("DABExtension", "loadTracks returning ${trackList.size} tracks for playlist=${playlist.id}")
 
@@ -540,54 +540,191 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
         Log.d("DABExtension", "loadSearchFeed called with query: '$query'")
 
-        // Simple tracks-only search - no tabs needed for single content type
-        val paged = PagedData.Single<Shelf> {
-            try {
-                Log.d("DABExtension", "Searching for tracks (no authentication required)")
-                val tracks = withContext(Dispatchers.IO) {
-                    api.searchTracks(query, 50)
-                }
-                Log.d("DABExtension", "Found ${tracks.size} track results")
+        // Create tabs for different search types
+        val searchTabs = listOf(
+            Tab(id = "all", title = "All"),
+            Tab(id = "tracks", title = "Tracks"),
+            Tab(id = "albums", title = "Albums"),
+            Tab(id = "artists", title = "Artists")
+        )
 
-                if (tracks.isEmpty()) {
-                    emptyList()
-                } else {
-                    listOf(Shelf.Lists.Tracks(
-                        id = "search_tracks",
-                        title = "Results",
-                        list = tracks
-                    ))
+        return Feed(searchTabs) { tab ->
+            when (tab?.id) {
+                "all" -> {
+                    val pagedAll: PagedData<Shelf> = PagedData.Single {
+                        try {
+                            Log.d("DABExtension", "Performing unified search for all types")
+                            val (tracks, albums, artists) = withContext(Dispatchers.IO) {
+                                api.searchAll(query, 20)
+                            }
+
+                            val shelves = mutableListOf<Shelf>()
+
+                            // Add tracks shelf if we have results
+                            if (tracks.isNotEmpty()) {
+                                shelves.add(Shelf.Lists.Tracks(
+                                    id = "search_all_tracks",
+                                    title = "Tracks",
+                                    list = tracks.take(10) // Limit for "All" view
+                                ))
+                            }
+
+                            // Add albums shelf if we have results
+                            if (albums.isNotEmpty()) {
+                                shelves.add(Shelf.Lists.Items(
+                                    id = "search_all_albums",
+                                    title = "Albums",
+                                    list = albums.take(10), // Limit for "All" view
+                                    type = Shelf.Lists.Type.Grid
+                                ))
+                            }
+
+                            // Add artists shelf if we have results
+                            if (artists.isNotEmpty()) {
+                                shelves.add(Shelf.Lists.Items(
+                                    id = "search_all_artists",
+                                    title = "Artists",
+                                    list = artists.take(10), // Limit for "All" view
+                                    type = Shelf.Lists.Type.Grid
+                                ))
+                            }
+
+                            Log.d("DABExtension", "All search results: ${tracks.size} tracks, ${albums.size} albums, ${artists.size} artists")
+                            shelves
+                        } catch (e: Throwable) {
+                            Log.e("DABExtension", "Exception in unified search: ${e.message}", e)
+                            emptyList()
+                        }
+                    }
+                    Feed.Data(pagedAll)
                 }
-            } catch (e: Throwable) {
-                Log.e("DABExtension", "Exception in track search: ${e.message}", e)
-                emptyList()
+                "tracks" -> {
+                    val pagedTracks: PagedData<Shelf> = PagedData.Single {
+                        try {
+                            Log.d("DABExtension", "Searching for tracks")
+                            val tracks = withContext(Dispatchers.IO) {
+                                api.searchTracks(query, 50)
+                            }
+                            Log.d("DABExtension", "Found ${tracks.size} track results")
+
+                            if (tracks.isEmpty()) {
+                                emptyList()
+                            } else {
+                                listOf(Shelf.Lists.Tracks(
+                                    id = "search_tracks",
+                                    title = "Results",
+                                    list = tracks
+                                ))
+                            }
+                        } catch (e: Throwable) {
+                            Log.e("DABExtension", "Exception in track search: ${e.message}", e)
+                            emptyList()
+                        }
+                    }
+                    Feed.Data(pagedTracks)
+                }
+                "albums" -> {
+                    val pagedAlbums: PagedData<Shelf> = PagedData.Single {
+                        try {
+                            Log.d("DABExtension", "Searching for albums")
+                            val albums = withContext(Dispatchers.IO) {
+                                api.searchAlbums(query, 50)
+                            }
+                            Log.d("DABExtension", "Found ${albums.size} album results")
+
+                            if (albums.isEmpty()) {
+                                emptyList()
+                            } else {
+                                listOf(Shelf.Lists.Items(
+                                    id = "search_albums",
+                                    title = "Results",
+                                    list = albums,
+                                    type = Shelf.Lists.Type.Grid
+                                ))
+                            }
+                        } catch (e: Throwable) {
+                            Log.e("DABExtension", "Exception in album search: ${e.message}", e)
+                            emptyList()
+                        }
+                    }
+                    Feed.Data(pagedAlbums)
+                }
+                "artists" -> {
+                    val pagedArtists: PagedData<Shelf> = PagedData.Single {
+                        try {
+                            Log.d("DABExtension", "Searching for artists")
+                            val artists = withContext(Dispatchers.IO) {
+                                api.searchArtists(query, 50)
+                            }
+                            Log.d("DABExtension", "Found ${artists.size} artist results")
+
+                            if (artists.isEmpty()) {
+                                emptyList()
+                            } else {
+                                listOf(Shelf.Lists.Items(
+                                    id = "search_artists",
+                                    title = "Results",
+                                    list = artists,
+                                    type = Shelf.Lists.Type.Grid
+                                ))
+                            }
+                        } catch (e: Throwable) {
+                            Log.e("DABExtension", "Exception in artist search: ${e.message}", e)
+                            emptyList()
+                        }
+                    }
+                    Feed.Data(pagedArtists)
+                }
+                else -> emptyList<Shelf>().toFeedData()
             }
         }
-
-        return paged.toFeed()
     }
 
     // --- AlbumClient ---
     override suspend fun loadAlbum(album: Album): Album {
+        Log.d("DABExtension", "loadAlbum called for albumId=${album.id}, title='${album.title}'")
+
         val dabAlbum = withContext(Dispatchers.IO) {
             api.getAlbum(album.id)
         }
-        return dabAlbum?.let { converter.toAlbum(it) } ?: album
+
+        val result = dabAlbum?.let { converter.toAlbum(it) } ?: album
+        Log.d("DABExtension", "loadAlbum returning album with ${result.trackCount} tracks for albumId=${album.id}")
+        return result
     }
 
     override suspend fun loadTracks(album: Album): Feed<Track>? {
+        Log.d("DABExtension", "loadTracks called for album=${album.id}, title='${album.title}'")
+
         val dabAlbum = withContext(Dispatchers.IO) {
             api.getAlbum(album.id)
         }
-        return dabAlbum?.tracks?.map { converter.toTrack(it) }?.toFeed()
+
+        val tracks = dabAlbum?.tracks?.map { converter.toTrack(it) }
+        Log.d("DABExtension", "loadTracks found ${tracks?.size ?: 0} tracks for album=${album.id}")
+
+        if (tracks.isNullOrEmpty()) {
+            Log.w("DABExtension", "No tracks found for album=${album.id}")
+            return null
+        }
+
+        return tracks.toFeed()
     }
 
     override suspend fun loadFeed(album: Album): Feed<Shelf>? {
+        Log.d("DABExtension", "loadFeed called for album=${album.id}, title='${album.title}'")
+
         val dabAlbum = withContext(Dispatchers.IO) {
             api.getAlbum(album.id)
         }
-        val tracks = dabAlbum?.tracks?.map { converter.toTrack(it) } ?: return null
-        if (tracks.isEmpty()) return null
+
+        val tracks = dabAlbum?.tracks?.map { converter.toTrack(it) }
+        Log.d("DABExtension", "loadFeed found ${tracks?.size ?: 0} tracks for album=${album.id}")
+
+        if (tracks.isNullOrEmpty()) {
+            Log.w("DABExtension", "No tracks found for album feed=${album.id}")
+            return null
+        }
 
         val shelves = listOf(
             Shelf.Lists.Tracks(
@@ -596,23 +733,37 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 list = tracks
             )
         )
+
+        Log.i("DABExtension", "SUCCESS: Returning album feed with ${tracks.size} tracks for album=${album.id}")
         return shelves.toFeed()
     }
 
     // --- ArtistClient ---
     override suspend fun loadArtist(artist: Artist): Artist {
+        Log.d("DABExtension", "loadArtist called for artistId=${artist.id}, name='${artist.name}'")
+
         val dabArtist = withContext(Dispatchers.IO) {
             api.getArtistDetails(artist.id)
         }
-        return dabArtist?.let { converter.toArtist(it) } ?: artist
+
+        val result = dabArtist?.let { converter.toArtist(it) } ?: artist
+        Log.d("DABExtension", "loadArtist returning artist for artistId=${artist.id}")
+        return result
     }
 
     override suspend fun loadFeed(artist: Artist): Feed<Shelf> {
+        Log.d("DABExtension", "loadFeed called for artist=${artist.id}, name='${artist.name}'")
+
         val albums = withContext(Dispatchers.IO) {
             api.getArtistDiscography(artist.id)
         }
 
-        if (albums.isEmpty()) return emptyList<Shelf>().toFeed()
+        Log.d("DABExtension", "Found ${albums.size} albums in discography for artist=${artist.id}")
+
+        if (albums.isEmpty()) {
+            Log.w("DABExtension", "No albums found in discography for artist=${artist.id}")
+            return emptyList<Shelf>().toFeed()
+        }
 
         val albumItems = albums.map { converter.toAlbum(it) }
         val shelves = listOf(
@@ -623,6 +774,8 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 type = Shelf.Lists.Type.Grid
             )
         )
+
+        Log.i("DABExtension", "SUCCESS: Returning artist feed with ${albumItems.size} albums for artist=${artist.id}")
         return shelves.toFeed()
     }
 

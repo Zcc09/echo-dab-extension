@@ -178,18 +178,130 @@ class DABApi(
     fun fetchFavoritesPage(pageIndex: Int = 1, pageSize: Int = 200): List<Track> = favoritesService.fetchFavoritesPage(pageIndex, pageSize)
 
     fun getAlbum(albumId: String): DabAlbum? {
-         return try {
-            val url = "https://dab.yeet.su/api/album?id=${URLEncoder.encode(albumId, "UTF-8")}"
-            val req = newRequestBuilder(url).build()
-            httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                val body = resp.body?.string() ?: return null
+        return try {
+            Log.d("DABApi", "Fetching album details for albumId: $albumId")
+
+            // Try multiple endpoint formats according to DAB API specification
+            val endpoints = listOf(
+                "https://dab.yeet.su/api/album/${URLEncoder.encode(albumId, "UTF-8")}", // Path parameter format
+                "https://dab.yeet.su/api/album?albumId=${URLEncoder.encode(albumId, "UTF-8")}", // Query parameter format
+                "https://dab.yeet.su/api/album?id=${URLEncoder.encode(albumId, "UTF-8")}" // Legacy format
+            )
+
+            for ((index, url) in endpoints.withIndex()) {
                 try {
-                    val sr: DabSingleAlbumResponse = json.decodeFromString(body)
-                    return sr.album
-                } catch (_: Throwable) { null }
+                    Log.d("DABApi", "Trying album endpoint ${index + 1}/${endpoints.size}: $url")
+                    val req = newRequestBuilder(url).build()
+                    httpClient.newCall(req).execute().use { resp ->
+                        Log.d("DABApi", "Album endpoint ${index + 1} response: ${resp.code} ${resp.message}")
+
+                        if (!resp.isSuccessful) {
+                            if (resp.code == 404) {
+                                Log.d("DABApi", "Album not found at endpoint ${index + 1}, trying next")
+                                continue
+                            } else {
+                                Log.w("DABApi", "Album request failed at endpoint ${index + 1}: ${resp.code}")
+                                continue
+                            }
+                        }
+
+                        val body = resp.body?.string() ?: continue
+                        Log.d("DABApi", "Album response body length: ${body.length} chars")
+
+                        try {
+                            // Try structured response first
+                            val sr: DabSingleAlbumResponse = json.decodeFromString(body)
+                            Log.i("DABApi", "SUCCESS: Parsed album '${sr.album.title}' with ${sr.album.tracks?.size ?: 0} tracks from endpoint ${index + 1}")
+                            return sr.album
+                        } catch (e: Throwable) {
+                            Log.d("DABApi", "Failed to parse as DabSingleAlbumResponse from endpoint ${index + 1}: ${e.message}")
+
+                            // Try direct album parsing
+                            try {
+                                val directAlbum: DabAlbum = json.decodeFromString(body)
+                                Log.i("DABApi", "SUCCESS: Parsed album '${directAlbum.title}' directly from endpoint ${index + 1}")
+                                return directAlbum
+                            } catch (e2: Throwable) {
+                                Log.d("DABApi", "Failed direct album parsing from endpoint ${index + 1}: ${e2.message}")
+
+                                // Try manual parsing from JSON structure
+                                try {
+                                    val root = json.parseToJsonElement(body)
+                                    val album = parseAlbumFromJsonElement(root)
+                                    if (album != null) {
+                                        Log.i("DABApi", "SUCCESS: Manually parsed album '${album.title}' from endpoint ${index + 1}")
+                                        return album
+                                    }
+                                } catch (e3: Throwable) {
+                                    Log.d("DABApi", "Manual album parsing failed from endpoint ${index + 1}: ${e3.message}")
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.w("DABApi", "Exception calling album endpoint ${index + 1}: ${e.message}")
+                }
             }
-        } catch (_: Throwable) { null }
+
+            Log.w("DABApi", "FAILED: No album found for albumId=$albumId after trying all endpoints")
+            null
+        } catch (e: Throwable) {
+            Log.e("DABApi", "Exception in getAlbum for albumId=$albumId: ${e.message}", e)
+            null
+        }
+    }
+
+    private fun parseAlbumFromJsonElement(root: JsonElement): DabAlbum? {
+        return try {
+            when (root) {
+                is JsonObject -> {
+                    // Check if root contains album data directly
+                    val albumObj = root["album"] as? JsonObject ?: root
+
+                    val id = (albumObj["id"] as? JsonPrimitive)?.content
+                        ?: (albumObj["albumId"] as? JsonPrimitive)?.content ?: return null
+                    val title = (albumObj["title"] as? JsonPrimitive)?.content
+                        ?: (albumObj["name"] as? JsonPrimitive)?.content ?: "Album"
+                    val artist = (albumObj["artist"] as? JsonPrimitive)?.content
+                        ?: (albumObj["artistName"] as? JsonPrimitive)?.content ?: ""
+                    val artistId = (albumObj["artistId"] as? JsonPrimitive)?.content?.toIntOrNull()
+                    val cover = (albumObj["cover"] as? JsonPrimitive)?.content
+                        ?: (albumObj["albumCover"] as? JsonPrimitive)?.content
+                    val releaseDate = (albumObj["releaseDate"] as? JsonPrimitive)?.content
+                    val trackCount = (albumObj["trackCount"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
+
+                    // Parse tracks if available
+                    val tracks = mutableListOf<DabTrack>()
+                    val tracksArray = albumObj["tracks"] as? JsonArray
+                    tracksArray?.forEach { trackEl ->
+                        if (trackEl is JsonObject) {
+                            try {
+                                val track = json.decodeFromJsonElement(DabTrack.serializer(), trackEl)
+                                tracks.add(track)
+                            } catch (_: Throwable) {
+                                val manualTrack = tryParseManualTrack(trackEl)
+                                if (manualTrack != null) tracks.add(manualTrack)
+                            }
+                        }
+                    }
+
+                    DabAlbum(
+                        id = id,
+                        title = title,
+                        artist = artist,
+                        artistId = artistId,
+                        cover = cover,
+                        releaseDate = releaseDate,
+                        trackCount = trackCount,
+                        tracks = if (tracks.isNotEmpty()) tracks else null
+                    )
+                }
+                else -> null
+            }
+        } catch (e: Throwable) {
+            Log.w("DABApi", "Failed to manually parse album: ${e.message}")
+            null
+        }
     }
 
     fun getLyrics(artist: String, title: String): String? {
@@ -263,7 +375,7 @@ class DABApi(
     // Playlist delegates
     fun fetchLibraryPlaylistsPage(pageIndex: Int = 1, pageSize: Int = 50): List<Playlist> = playlistService.fetchLibraryPlaylistsPage(pageIndex, pageSize)
 
-    fun getPlaylistTracks(playlist: Playlist, pageIndex: Int = 1, pageSize: Int = 1000): PagedData<Track> {
+    fun getPlaylistTracks(playlist: Playlist, pageSize: Int = 1000): PagedData<Track> {
          return PagedData.Single {
             try {
                 kotlinx.coroutines.runBlocking {
@@ -328,7 +440,7 @@ class DABApi(
 
                             try {
                                 // Try parsing with correct DAB API response format first
-                                val response = json.decodeFromString<dev.brahmkshatriya.echo.extension.models.DabLibraryResponse>(body)
+                                val response = json.decodeFromString<DabLibraryResponse>(body)
                                 val tracks = response.library?.tracks?.mapNotNull { track ->
                                     try { converter.toTrack(track) } catch (_: Throwable) { null }
                                 } ?: emptyList()
@@ -436,51 +548,243 @@ class DABApi(
 
     fun getArtistDetails(artistId: String): DabArtist? {
         return try {
-            val url = "https://dab.yeet.su/api/artist?id=${URLEncoder.encode(artistId, "UTF-8")}"
-            val req = newRequestBuilder(url).build()
-            httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                val body = resp.body?.string() ?: return null
+            Log.d("DABApi", "Fetching artist details for artistId: $artistId")
+
+            // Try multiple endpoint formats according to DAB API specification
+            val endpoints = listOf(
+                "https://dab.yeet.su/api/artist/${URLEncoder.encode(artistId, "UTF-8")}", // Path parameter format
+                "https://dab.yeet.su/api/artist?artistId=${URLEncoder.encode(artistId, "UTF-8")}", // Query parameter format
+                "https://dab.yeet.su/api/artist?id=${URLEncoder.encode(artistId, "UTF-8")}" // Legacy format
+            )
+
+            for ((index, url) in endpoints.withIndex()) {
                 try {
-                    json.decodeFromString<DabArtist>(body)
-                } catch (_: Throwable) { null }
+                    Log.d("DABApi", "Trying artist endpoint ${index + 1}/${endpoints.size}: $url")
+                    val req = newRequestBuilder(url).build()
+                    httpClient.newCall(req).execute().use { resp ->
+                        Log.d("DABApi", "Artist endpoint ${index + 1} response: ${resp.code} ${resp.message}")
+
+                        if (!resp.isSuccessful) {
+                            if (resp.code == 404) {
+                                Log.d("DABApi", "Artist not found at endpoint ${index + 1}, trying next")
+                                continue
+                            } else {
+                                Log.w("DABApi", "Artist request failed at endpoint ${index + 1}: ${resp.code}")
+                                continue
+                            }
+                        }
+
+                        val body = resp.body?.string() ?: continue
+                        Log.d("DABApi", "Artist response body length: ${body.length} chars")
+
+                        try {
+                            // Try direct artist parsing first
+                            val artist = json.decodeFromString<DabArtist>(body)
+                            Log.i("DABApi", "SUCCESS: Parsed artist '${artist.name}' from endpoint ${index + 1}")
+                            return artist
+                        } catch (e: Throwable) {
+                            Log.d("DABApi", "Failed direct artist parsing from endpoint ${index + 1}: ${e.message}")
+
+                            // Try structured response format
+                            try {
+                                val root = json.parseToJsonElement(body) as? JsonObject
+                                val artistObj = root?.get("artist") as? JsonObject ?: root
+                                if (artistObj != null) {
+                                    val parsedArtist = json.decodeFromJsonElement(DabArtist.serializer(), artistObj)
+                                    Log.i("DABApi", "SUCCESS: Parsed artist '${parsedArtist.name}' from structured response at endpoint ${index + 1}")
+                                    return parsedArtist
+                                }
+                            } catch (e2: Throwable) {
+                                Log.d("DABApi", "Structured artist parsing failed from endpoint ${index + 1}: ${e2.message}")
+
+                                // Try manual parsing as last resort
+                                try {
+                                    val root = json.parseToJsonElement(body)
+                                    val artist = parseArtistFromJsonElement(root)
+                                    if (artist != null) {
+                                        Log.i("DABApi", "SUCCESS: Manually parsed artist '${artist.name}' from endpoint ${index + 1}")
+                                        return artist
+                                    }
+                                } catch (e3: Throwable) {
+                                    Log.d("DABApi", "Manual artist parsing failed from endpoint ${index + 1}: ${e3.message}")
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.w("DABApi", "Exception calling artist endpoint ${index + 1}: ${e.message}")
+                }
             }
-        } catch (_: Throwable) { null }
+
+            Log.w("DABApi", "FAILED: No artist found for artistId=$artistId after trying all endpoints")
+            null
+        } catch (e: Throwable) {
+            Log.e("DABApi", "Exception in getArtistDetails for artistId=$artistId: ${e.message}", e)
+            null
+        }
+    }
+
+    private fun parseArtistFromJsonElement(root: JsonElement): DabArtist? {
+        return try {
+            when (root) {
+                is JsonObject -> {
+                    // Check if root contains artist data directly
+                    val artistObj = root["artist"] as? JsonObject ?: root
+
+                    val idEl = artistObj["id"] ?: artistObj["artistId"] ?: return null
+                    val idStr = (idEl as? JsonPrimitive)?.content ?: idEl.toString()
+                    val idInt = idStr.toIntOrNull() ?: return null
+
+                    val name = (artistObj["name"] as? JsonPrimitive)?.content
+                        ?: (artistObj["title"] as? JsonPrimitive)?.content
+                        ?: (artistObj["artistName"] as? JsonPrimitive)?.content ?: "Artist"
+                    val picture = (artistObj["picture"] as? JsonPrimitive)?.content
+                        ?: (artistObj["cover"] as? JsonPrimitive)?.content
+                        ?: (artistObj["image"] as? JsonPrimitive)?.content
+
+                    DabArtist(
+                        id = idInt,
+                        name = name,
+                        picture = picture
+                    )
+                }
+                else -> null
+            }
+        } catch (e: Throwable) {
+            Log.w("DABApi", "Failed to manually parse artist: ${e.message}")
+            null
+        }
     }
 
     fun getArtistDiscography(artistId: String): List<DabAlbum> {
         return try {
-            val url = "https://dab.yeet.su/api/discography?artistId=${URLEncoder.encode(artistId, "UTF-8")}"
-            val req = newRequestBuilder(url).build()
-            httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return emptyList()
-                val body = resp.body?.string() ?: return emptyList()
-                try {
-                    val root = json.decodeFromString<JsonElement>(body)
-                    val out = mutableListOf<DabAlbum>()
+            Log.d("DABApi", "Fetching discography for artistId: $artistId")
 
-                    val arr = when (root) {
-                        is JsonObject -> (root["albums"] as? JsonArray) ?: (root["data"] as? JsonArray) ?: (root["items"] as? JsonArray)
-                        is JsonArray -> root
-                        else -> null
+            // Try multiple endpoint formats according to DAB API specification
+            val endpoints = listOf(
+                "https://dab.yeet.su/api/discography?artistId=${URLEncoder.encode(artistId, "UTF-8")}", // Standard format
+                "https://dab.yeet.su/api/artist/${URLEncoder.encode(artistId, "UTF-8")}/albums", // RESTful format
+                "https://dab.yeet.su/api/artist/${URLEncoder.encode(artistId, "UTF-8")}/discography", // Alternative RESTful
+                "https://dab.yeet.su/api/albums?artistId=${URLEncoder.encode(artistId, "UTF-8")}", // Albums by artist
+                "https://dab.yeet.su/api/discography/${URLEncoder.encode(artistId, "UTF-8")}" // Path parameter format
+            )
+
+            for ((index, url) in endpoints.withIndex()) {
+                try {
+                    Log.d("DABApi", "Trying discography endpoint ${index + 1}/${endpoints.size}: $url")
+                    val req = newRequestBuilder(url).build()
+                    httpClient.newCall(req).execute().use { resp ->
+                        Log.d("DABApi", "Discography endpoint ${index + 1} response: ${resp.code} ${resp.message}")
+
+                        if (!resp.isSuccessful) {
+                            if (resp.code == 404) {
+                                Log.d("DABApi", "Discography not found at endpoint ${index + 1}, trying next")
+                                continue
+                            } else {
+                                Log.w("DABApi", "Discography request failed at endpoint ${index + 1}: ${resp.code}")
+                                continue
+                            }
+                        }
+
+                        val body = resp.body?.string() ?: continue
+                        Log.d("DABApi", "Discography response body length: ${body.length} chars")
+
+                        try {
+                            val root = json.decodeFromString<JsonElement>(body)
+                            val albums = parseDiscographyFromJsonElement(root)
+
+                            if (albums.isNotEmpty()) {
+                                Log.i("DABApi", "SUCCESS: Found ${albums.size} albums for artistId=$artistId from endpoint ${index + 1}")
+                                return albums
+                            } else {
+                                Log.d("DABApi", "No albums found in response from endpoint ${index + 1}")
+                            }
+                        } catch (e: Throwable) {
+                            Log.d("DABApi", "Failed to parse discography from endpoint ${index + 1}: ${e.message}")
+                            Log.d("DABApi", "Response body preview: ${body.take(200)}")
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.w("DABApi", "Exception calling discography endpoint ${index + 1}: ${e.message}")
+                }
+            }
+
+            Log.w("DABApi", "FAILED: No discography found for artistId=$artistId after trying all endpoints")
+            emptyList()
+        } catch (e: Throwable) {
+            Log.e("DABApi", "Exception in getArtistDiscography for artistId=$artistId: ${e.message}", e)
+            emptyList()
+        }
+    }
+
+    private fun parseDiscographyFromJsonElement(root: JsonElement): List<DabAlbum> {
+        val out = mutableListOf<DabAlbum>()
+
+        try {
+            when (root) {
+                is JsonObject -> {
+                    // Check for different response structures
+                    val candidates = listOf("albums", "discography", "data", "items", "results", "content")
+
+                    for (key in candidates) {
+                        val arr = root[key] as? JsonArray
+                        if (arr != null) {
+                            Log.d("DABApi", "Found ${arr.size} items in '$key' array")
+                            arr.forEach { el ->
+                                if (el is JsonObject) {
+                                    try {
+                                        val album = json.decodeFromJsonElement(DabAlbum.serializer(), el)
+                                        out.add(album)
+                                    } catch (_: Throwable) {
+                                        // Try manual album parsing
+                                        val manualAlbum = parseAlbumFromJsonElement(el)
+                                        if (manualAlbum != null) out.add(manualAlbum)
+                                    }
+                                }
+                            }
+                            if (out.isNotEmpty()) break
+                        }
                     }
 
-                    arr?.forEach { el ->
+                    // If no arrays found, try parsing root as single album
+                    if (out.isEmpty()) {
+                        try {
+                            val album = json.decodeFromJsonElement(DabAlbum.serializer(), root)
+                            out.add(album)
+                        } catch (_: Throwable) {
+                            val manualAlbum = parseAlbumFromJsonElement(root)
+                            if (manualAlbum != null) out.add(manualAlbum)
+                        }
+                    }
+                }
+                is JsonArray -> {
+                    Log.d("DABApi", "Parsing direct array with ${root.size} items")
+                    root.forEach { el ->
                         if (el is JsonObject) {
                             try {
                                 val album = json.decodeFromJsonElement(DabAlbum.serializer(), el)
                                 out.add(album)
-                            } catch (_: Throwable) { }
+                            } catch (_: Throwable) {
+                                val manualAlbum = parseAlbumFromJsonElement(el)
+                                if (manualAlbum != null) out.add(manualAlbum)
+                            }
                         }
                     }
-                    out
-                } catch (_: Throwable) { emptyList() }
+                }
+                else -> {
+                    Log.d("DABApi", "Unexpected JSON structure for discography: ${root::class.simpleName}")
+                }
             }
-        } catch (_: Throwable) { emptyList() }
+        } catch (e: Throwable) {
+            Log.w("DABApi", "Failed to parse discography: ${e.message}")
+        }
+
+        Log.d("DABApi", "Parsed ${out.size} albums from discography response")
+        return out
     }
 
     // Add a debug helper method to diagnose playlist issues
-    suspend fun debugPlaylistIssues(playlist: Playlist): String {
+    fun debugPlaylistIssues(playlist: Playlist): String {
         val debug = StringBuilder()
         debug.appendLine("=== PLAYLIST DEBUG INFO ===")
         debug.appendLine("Playlist ID: ${playlist.id}")

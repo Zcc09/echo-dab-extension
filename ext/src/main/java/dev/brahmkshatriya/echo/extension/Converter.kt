@@ -200,7 +200,57 @@ class Converter {
             title = album.title,
             cover = album.cover?.toImageHolder(),
             artists = listOf(Artist(id = album.artistId?.toString() ?: album.artist, name = album.artist)),
-            trackCount = album.trackCount.toLong()
+            trackCount = album.trackCount.toLong(),
+            duration = album.tracks?.sumOf { it.duration * 1000L }, // Convert to milliseconds
+            releaseDate = album.releaseDate?.let {
+                try {
+                    // Try to parse different date formats
+                    when {
+                        it.contains("-") -> {
+                            val parts = it.split("-")
+                            if (parts.size >= 3) {
+                                val day = parts[2].toIntOrNull()
+                                val month = parts[1].toIntOrNull()
+                                val year = parts[0].toIntOrNull()
+                                if (year != null) {
+                                    dev.brahmkshatriya.echo.common.models.Date(
+                                        day = day,
+                                        month = month,
+                                        year = year
+                                    )
+                                } else null
+                            } else if (parts.size >= 2) {
+                                val month = parts[1].toIntOrNull()
+                                val year = parts[0].toIntOrNull()
+                                if (year != null) {
+                                    dev.brahmkshatriya.echo.common.models.Date(
+                                        month = month,
+                                        year = year
+                                    )
+                                } else null
+                            } else {
+                                val year = parts[0].toIntOrNull()
+                                if (year != null) {
+                                    dev.brahmkshatriya.echo.common.models.Date(year = year)
+                                } else null
+                            }
+                        }
+                        it.length == 4 -> {
+                            val year = it.toIntOrNull()
+                            if (year != null) {
+                                dev.brahmkshatriya.echo.common.models.Date(year = year)
+                            } else null
+                        }
+                        else -> null
+                    }
+                } catch (_: Throwable) { null }
+            },
+            subtitle = album.releaseDate?.let { "Released $it" },
+            extras = mapOf(
+                "dab_id" to album.id,
+                "artist_id" to (album.artistId?.toString() ?: ""),
+                "release_date" to (album.releaseDate ?: "")
+            ).filterValues { it.isNotBlank() }
         )
     }
 
@@ -208,7 +258,13 @@ class Converter {
         return Artist(
             id = artist.id.toString(),
             name = artist.name,
-            cover = artist.picture?.toImageHolder()
+            cover = artist.picture?.toImageHolder(),
+            bio = null, // DAB API doesn't provide bio in basic artist info
+            subtitle = null,
+            extras = mapOf(
+                "dab_id" to artist.id.toString(),
+                "picture_url" to (artist.picture ?: "")
+            ).filterValues { it.isNotBlank() }
         )
     }
 
