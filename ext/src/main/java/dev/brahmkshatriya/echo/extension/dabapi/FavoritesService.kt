@@ -26,6 +26,11 @@ class FavoritesService(
     fun invalidateCache() = invalidateInternal()
 
     private fun loadAllFavorites(): List<Track> {
+        // If not logged in, clear and return empty
+        if (!requestUtils.isLoggedIn()) {
+            invalidateInternal()
+            return emptyList()
+        }
         val now = System.currentTimeMillis()
         val cached = favoritesCache
         if (cached != null && now - cached.first < CACHE_TTL_MS) return cached.second

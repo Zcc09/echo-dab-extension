@@ -16,7 +16,6 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import java.util.regex.Pattern
 
 class Converter {
 
@@ -49,9 +48,9 @@ class Converter {
             id = playlist.id,
             title = playlist.name,
             authors = listOf(Artist(id = "user", name = "You")),
-            isEditable = false,
+            isEditable = true,
             trackCount = playlist.trackCount.toLong(),
-            cover = null
+            cover = playlist.cover?.toImageHolder()
         )
     }
 

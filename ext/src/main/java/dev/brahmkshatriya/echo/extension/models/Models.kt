@@ -22,7 +22,8 @@ data class DabPlaylist(
     val description: String?,
     val isPublic: Boolean,
     val trackCount: Int,
-    val createdAt: String
+    val createdAt: String,
+    val cover: String? = null
 )
 
 @Serializable

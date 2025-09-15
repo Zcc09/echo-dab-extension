@@ -4,7 +4,6 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Artist
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.net.URLEncoder
@@ -17,6 +16,8 @@ import dev.brahmkshatriya.echo.extension.Converter
 import dev.brahmkshatriya.echo.extension.utils.RequestUtils
 import dev.brahmkshatriya.echo.extension.utils.JsonParsingUtils
 import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 class PlaylistService(
     private val httpClient: OkHttpClient,
@@ -58,7 +59,7 @@ class PlaylistService(
                 return@withContext cacheEntry.second
             }
 
-            val correctEndpoint = "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}"
+            val correctEndpoint = "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}".trim()
             val requestUrl = "$correctEndpoint?page=$pageIndex&limit=$pageSize"
 
             val clientRobust = httpClient.newBuilder().callTimeout(10000, TimeUnit.MILLISECONDS).build()
@@ -87,7 +88,7 @@ class PlaylistService(
                         return@withContext tracks
                     }
                 }
-            } catch (e: Throwable) { }
+            } catch (_: Throwable) { }
 
             playlistCache[playlist.id] = now to emptyList()
             emptyList()
@@ -103,7 +104,7 @@ class PlaylistService(
                     try { converter.toTrack(track) } catch (_: Throwable) { null }
                 }
             }
-        } catch (e: Throwable) { }
+        } catch (_: Throwable) { }
 
         // Fallback to consolidated parsing
         try {
@@ -223,5 +224,134 @@ class PlaylistService(
                 }
             } catch (_: Throwable) { }
         }
+    }
+
+    fun invalidateCaches() {
+        playlistsCache = null
+        playlistCache.clear()
+    }
+
+    // Create a new playlist (library)
+    fun createPlaylist(title: String, description: String?): Playlist {
+        val bodyJson = buildString {
+            append('{')
+            append("\"name\":\"").append(title.replace("\"", "\\\"")).append('"')
+            if (!description.isNullOrBlank()) {
+                append(',')
+                append("\"description\":\"").append(description.replace("\"", "\\\"")).append('"')
+            }
+            append('}')
+        }
+        val req = requestUtils.newRequestBuilder("https://dab.yeet.su/api/libraries")
+            .post(bodyJson.toRequestBody("application/json".toMediaType())).build()
+        httpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                requestUtils.clearSessionOnAuthFailure(resp.code)
+                error("Failed to create playlist: ${resp.code}")
+            }
+            val body = resp.body?.string() ?: error("Empty create playlist response")
+            val playlist = parseSinglePlaylist(body) ?: error("Failed to parse created playlist")
+            invalidateCaches()
+            return playlist
+        }
+    }
+
+    // Delete a playlist
+    fun deletePlaylist(playlist: Playlist) {
+        val req = requestUtils.newRequestBuilder("https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}")
+            .delete().build()
+        httpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                requestUtils.clearSessionOnAuthFailure(resp.code)
+                error("Failed to delete playlist: ${resp.code}")
+            }
+            invalidateCaches()
+        }
+    }
+
+    // Edit playlist metadata
+    fun editPlaylistMetadata(playlist: Playlist, title: String, description: String?) : Playlist {
+        val bodyJson = buildString {
+            append('{')
+            append("\"name\":\"").append(title.replace("\"", "\\\"")).append('"')
+            if (description != null) {
+                append(',')
+                append("\"description\":")
+                if (description.isBlank()) append("null") else append("\"").append(description.replace("\"", "\\\"")).append('"')
+            }
+            append('}')
+        }
+        val req = requestUtils.newRequestBuilder("https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}")
+            .patch(bodyJson.toRequestBody("application/json".toMediaType())).build()
+        httpClient.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                requestUtils.clearSessionOnAuthFailure(resp.code)
+                error("Failed to edit playlist: ${resp.code}")
+            }
+            val body = resp.body?.string() ?: return playlist
+            val updated = parseSinglePlaylist(body) ?: playlist.copy(title = title)
+            invalidateCaches()
+            return updated
+        }
+    }
+
+    // Add tracks to playlist (sequentially)
+    fun addTracks(playlist: Playlist, new: List<Track>) {
+        if (new.isEmpty()) return
+        for (t in new) {
+            try {
+                val inner = converter.toDabTrackJson(t).toString()
+                val wrapper = "{\"track\":$inner}"
+                val req = requestUtils.newRequestBuilder("https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks")
+                    .post(wrapper.toRequestBody("application/json".toMediaType())).build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        requestUtils.clearSessionOnAuthFailure(resp.code)
+                    }
+                }
+            } catch (_: Throwable) { }
+        }
+        playlistCache.remove(playlist.id)
+    }
+
+    // Remove tracks by id
+    fun removeTracks(playlist: Playlist, tracks: List<Track>, indexes: List<Int>) {
+        if (indexes.isEmpty()) return
+        val uniqueIds = indexes.mapNotNull { tracks.getOrNull(it)?.id }.distinct()
+        for (id in uniqueIds) {
+            try {
+                val url = "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks/${URLEncoder.encode(id, "UTF-8") }"
+                val req = requestUtils.newRequestBuilder(url).delete().build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        requestUtils.clearSessionOnAuthFailure(resp.code)
+                    }
+                }
+            } catch (_: Throwable) { }
+        }
+        playlistCache.remove(playlist.id)
+    }
+
+    // Parse a single playlist from body
+    private fun parseSinglePlaylist(body: String): Playlist? {
+        try {
+            val root = json.parseToJsonElement(body)
+            if (root is JsonObject) {
+                val libraryObj = (root["library"] as? JsonObject) ?: root
+                val id = (libraryObj["id"] as? JsonPrimitive)?.content ?: return null
+                val name = (libraryObj["name"] as? JsonPrimitive)?.content
+                    ?: (libraryObj["title"] as? JsonPrimitive)?.content ?: return null
+                val trackCount = (libraryObj["trackCount"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
+                return Playlist(
+                    id = id,
+                    title = name,
+                    authors = listOf(Artist(id = "user", name = "You")),
+                    isEditable = true,
+                    trackCount = trackCount.toLong(),
+                    cover = null
+                )
+            }
+        } catch (_: Throwable) { }
+        return parsePlaylistsFromBody(body).firstOrNull()
     }
 }

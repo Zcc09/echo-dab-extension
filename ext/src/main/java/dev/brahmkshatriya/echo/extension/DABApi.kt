@@ -99,11 +99,19 @@ class DABApi(
         }
     }
 
+    /** Invalidate all internal caches (favorites, playlists, streams) */
+    fun invalidateAllCaches() {
+        try { playlistService.invalidateCaches() } catch (_: Throwable) {}
+        try { favoritesService.invalidateCache() } catch (_: Throwable) {}
+        try { streamResolver.clearCache() } catch (_: Throwable) {}
+    }
+
     /** Clear stored session data */
     fun clearSession() {
         settings.putString("session_cookie", null)
         isSessionValid = false
         lastSessionCheck = 0
+        invalidateAllCaches()
     }
 
     /** Create HTTP request builder with standard headers */
@@ -167,7 +175,6 @@ class DABApi(
     // Stream resolution delegates
     fun getCachedStreamUrl(trackId: String?): String? = streamResolver.getCachedStreamUrl(trackId)
     fun getStreamUrl(trackId: String): String? = streamResolver.getStreamUrl(trackId)
-
     // Favorites delegates
     fun getFavoritesAuthenticated(limit: Int = 200, offset: Int = 0): List<Track> = favoritesService.getFavoritesAuthenticated(limit, offset)
 
@@ -368,6 +375,13 @@ class DABApi(
 
     // Playlist delegates
     fun fetchLibraryPlaylistsPage(pageIndex: Int = 1, pageSize: Int = 50): List<Playlist> = playlistService.fetchLibraryPlaylistsPage(pageIndex, pageSize)
+
+    // Added playlist edit wrappers
+    fun createPlaylist(title: String, description: String?): Playlist = playlistService.createPlaylist(title, description)
+    fun deletePlaylist(playlist: Playlist) = playlistService.deletePlaylist(playlist)
+    fun editPlaylistMetadata(playlist: Playlist, title: String, description: String?): Playlist = playlistService.editPlaylistMetadata(playlist, title, description)
+    fun addTracksToPlaylist(playlist: Playlist, new: List<Track>) = playlistService.addTracks(playlist, new)
+    fun removeTracksFromPlaylist(playlist: Playlist, tracks: List<Track>, indexes: List<Int>) = playlistService.removeTracks(playlist, tracks, indexes)
 
     /** Get playlist tracks as paged data */
     fun getPlaylistTracks(playlist: Playlist, pageSize: Int = 1000): PagedData<Track> {
@@ -718,76 +732,6 @@ class DABApi(
 
         Log.d("DABApi", "Parsed ${out.size} albums from discography response")
         return out
-    }
-
-    // Add a debug helper method to diagnose playlist issues
-    fun debugPlaylistIssues(playlist: Playlist): String {
-        val debug = StringBuilder()
-        debug.appendLine("=== PLAYLIST DEBUG INFO ===")
-        debug.appendLine("Playlist ID: ${playlist.id}")
-        debug.appendLine("Playlist Title: ${playlist.title}")
-        debug.appendLine("Track Count: ${playlist.trackCount}")
-
-        // Check session validity
-        val hasSession = hasValidSession()
-        debug.appendLine("Has Valid Session: $hasSession")
-
-        if (!hasSession) {
-            debug.appendLine("ERROR: No valid session - user needs to login")
-            return debug.toString()
-        }
-
-        // Check cookie
-        val cookie = cookieHeaderValue()
-        debug.appendLine("Session Cookie Present: ${!cookie.isNullOrBlank()}")
-
-        // Try each endpoint manually
-        val endpoints = listOf(
-            "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
-            "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks",
-            "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}",
-            "https://dab.yeet.su/api/playlists/${URLEncoder.encode(playlist.id, "UTF-8")}"
-        )
-
-        for ((index, url) in endpoints.withIndex()) {
-            try {
-                val rb = Request.Builder().url(url)
-                if (!cookie.isNullOrBlank()) rb.header("Cookie", cookie)
-                rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
-
-                httpClient.newCall(rb.build()).execute().use { resp ->
-                    debug.appendLine("Endpoint ${index + 1}: $url")
-                    debug.appendLine("  Response: ${resp.code} ${resp.message}")
-
-                    if (resp.isSuccessful) {
-                        val body = resp.body?.string()
-                        debug.appendLine("  Body Length: ${body?.length ?: 0} chars")
-
-                        if (!body.isNullOrEmpty()) {
-                            try {
-                                val root = json.parseToJsonElement(body)
-                                val tracks = jsonParsingUtils.parseTracksFromResponse(root)
-                                debug.appendLine("  Parsed Tracks: ${tracks.size}")
-                                // Ensure tracks is a List<Track> so .title and .artists are valid
-                                if (tracks.isNotEmpty()) {
-                                    debug.appendLine("  FOUND TRACKS - This endpoint works!")
-                                    debug.appendLine("  Sample track: ${tracks.first().title} by ${tracks.first().artists.firstOrNull()?.name}")
-                                }
-                            } catch (e: Throwable) {
-                                debug.appendLine("  Parse Error: ${e.message}")
-                                debug.appendLine("  Body Preview: ${body.take(200)}")
-                            }
-                        }
-                    } else {
-                        debug.appendLine("  ERROR: Request failed")
-                    }
-                }
-            } catch (e: Throwable) {
-                debug.appendLine("Endpoint ${index + 1}: EXCEPTION - ${e.message}")
-            }
-        }
-
-        return debug.toString()
     }
 
     /** Search all content types */

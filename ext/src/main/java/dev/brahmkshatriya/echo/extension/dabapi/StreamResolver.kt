@@ -17,6 +17,12 @@ class StreamResolver(
     private val trackStreamCache = ConcurrentHashMap<String, Pair<Long, String>>()
     private val STREAM_CACHE_TTL_MS = 5 * 60 * 1000L
 
+    /** Expose cache clear for logout */
+    fun clearCache() {
+        try { trackStreamCache.clear() } catch (_: Throwable) {}
+        settings.putString("stream_cache_keys", null)
+    }
+
     /** Load persistent stream cache from settings */
     fun loadPersistentStreamCache() {
         val keys = settings.getString("stream_cache_keys") ?: return
