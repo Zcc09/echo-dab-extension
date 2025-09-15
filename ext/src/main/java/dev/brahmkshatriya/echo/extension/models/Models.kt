@@ -15,7 +15,6 @@ data class DabUser(
     val email: String
 )
 
-
 @Serializable
 data class DabPlaylist(
     val id: String,
@@ -46,13 +45,6 @@ data class DabTrack(
     val audioQuality: DabAudioQuality? = null
 )
 
-
-@Serializable
-data class DabLibrary(
-    val tracks: List<DabTrack>,
-    val pagination: DabPagination
-)
-
 @Serializable
 data class DabPagination(
     val hasMore: Boolean
@@ -72,7 +64,6 @@ data class DabStreamResponse(
     val stream: String? = null,
     val link: String? = null
 )
-
 
 @Serializable
 data class DabSingleAlbumResponse(
@@ -98,7 +89,6 @@ data class DabArtist(
     val picture: String?
 )
 
-
 @Serializable
 data class DabLyricsResponse(
     val lyrics: String?
@@ -118,11 +108,6 @@ data class DabLibraryData(
     val trackCount: Int = 0,
     val tracks: List<DabTrack> = emptyList(),
     val pagination: DabPagination? = null
-)
-
-@Serializable
-data class DabLibrariesResponse(
-    val libraries: List<DabLibraryData> = emptyList()
 )
 
 @Serializable
@@ -156,6 +141,6 @@ data class DabSearchResult(
     val picture: String? = null,
     val albumsCount: Int? = null,
 
-    // Common fields to help identify type
-    val type: String? = null // Sometimes APIs include this
+    // Type identifier
+    val type: String? = null
 )

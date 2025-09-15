@@ -5,7 +5,6 @@ import dev.brahmkshatriya.echo.common.settings.Settings
 import okhttp3.OkHttpClient
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
-import java.util.regex.Pattern
 import java.util.concurrent.ConcurrentHashMap
 import java.net.URL
 import okhttp3.Request
@@ -16,8 +15,9 @@ class StreamResolver(
     private val settings: Settings
 ) {
     private val trackStreamCache = ConcurrentHashMap<String, Pair<Long, String>>()
-    private val STREAM_CACHE_TTL_MS = 5 * 60 * 1000L // 5 minutes
+    private val STREAM_CACHE_TTL_MS = 5 * 60 * 1000L
 
+    /** Load persistent stream cache from settings */
     fun loadPersistentStreamCache() {
         val keys = settings.getString("stream_cache_keys") ?: return
         if (keys.isBlank()) return
@@ -41,6 +41,7 @@ class StreamResolver(
         else settings.putString("stream_cache_keys", null)
     }
 
+    /** Persist stream cache entry to settings */
     private fun persistStreamCacheEntry(trackId: String, url: String) {
         try {
             val keyName = "stream_cache_$trackId"
@@ -56,6 +57,7 @@ class StreamResolver(
         } catch (_: Throwable) {}
     }
 
+    /** Normalize track ID for cache key */
     private fun normalizeTrackIdForCache(raw: String?): String? {
         if (raw == null) return null
         val s = raw.trim()
@@ -74,6 +76,7 @@ class StreamResolver(
         return s
     }
 
+    /** Get cached stream URL if available and valid */
     fun getCachedStreamUrl(trackId: String?): String? {
         val normalized = normalizeTrackIdForCache(trackId) ?: return null
         try {
@@ -83,77 +86,7 @@ class StreamResolver(
         return null
     }
 
-    fun resolveApiStreamEndpoint(endpointUrl: String): String? {
-        var found: String? = null
-        try {
-            val req = Request.Builder().url(endpointUrl).build()
-            val resp = httpClient.newCall(req).execute()
-            resp.use { r ->
-                try {
-                    val effective = r.request.url.toString()
-                    if (!effective.equals(endpointUrl, ignoreCase = true) && effective.startsWith("http")) {
-                        if (!effective.contains("/api/stream")) { found = effective; return@use }
-                    }
-                } catch (_: Throwable) {}
-
-                val location = r.header("Location")
-                if (!location.isNullOrBlank()) { found = location; return@use }
-                if (!r.isSuccessful) return null
-                val body = r.body?.string() ?: return null
-                try {
-                    val sr = json.decodeFromString(dev.brahmkshatriya.echo.extension.models.DabStreamResponse.serializer(), body)
-                    val resolved = sr.streamUrl ?: sr.url ?: sr.stream ?: sr.link
-                    if (!resolved.isNullOrBlank()) { found = resolved; return@use }
-                } catch (_: Throwable) {}
-
-                try {
-                    val pattern = Pattern.compile("https?://[^\"'\\s<>]+", Pattern.CASE_INSENSITIVE)
-                    val matcher = pattern.matcher(body)
-                    if (matcher.find()) { found = matcher.group(); return@use }
-                } catch (_: Throwable) {}
-            }
-        } catch (_: Throwable) { return null }
-        return found
-    }
-
-    fun quickResolveStreamUrl(trackId: String, timeoutMs: Long = 1000L): String? {
-        val normalized = normalizeTrackIdForCache(trackId) ?: return null
-        var found: String? = null
-        try {
-            val clientShort = httpClient.newBuilder().callTimeout(timeoutMs, TimeUnit.MILLISECONDS).build()
-            val url = if (normalized.startsWith("http", true)) normalized else "https://dab.yeet.su/api/stream?trackId=$normalized"
-            val resp = clientShort.newCall(Request.Builder().url(url).build()).execute()
-            resp.use { r ->
-                try {
-                    val effective = r.request.url.toString()
-                    if (!effective.equals(url, ignoreCase = true) && effective.startsWith("http")) {
-                        if (!effective.contains("/api/stream")) { found = effective; try { trackStreamCache[normalized] = System.currentTimeMillis() to effective; persistStreamCacheEntry(normalized, effective) } catch (_: Throwable) {}; return@use }
-                    }
-                } catch (_: Throwable) {}
-
-                val location = r.header("Location")
-                if (!location.isNullOrBlank()) { found = location; try { trackStreamCache[normalized] = System.currentTimeMillis() to location; persistStreamCacheEntry(normalized, location) } catch (_: Throwable) {}; return@use }
-                if (!r.isSuccessful) return null
-                val body = r.body?.string() ?: return null
-                try {
-                    val sr = json.decodeFromString(dev.brahmkshatriya.echo.extension.models.DabStreamResponse.serializer(), body)
-                    val resolved = sr.streamUrl ?: sr.url ?: sr.stream ?: sr.link
-                    if (!resolved.isNullOrBlank()) { found = resolved; try { trackStreamCache[normalized] = System.currentTimeMillis() to resolved; persistStreamCacheEntry(normalized, resolved) } catch (_: Throwable) {}; return@use }
-                } catch (_: Throwable) {
-                    val s = body.trim()
-                    if (s.startsWith("http")) { found = s; try { trackStreamCache[normalized] = System.currentTimeMillis() to s; persistStreamCacheEntry(normalized, s) } catch (_: Throwable) {}; return@use }
-                    try {
-                        val pattern = Pattern.compile("https?://[^\"'\\s<>]+", Pattern.CASE_INSENSITIVE)
-                        val matcher = pattern.matcher(s)
-                        if (matcher.find()) { found = matcher.group(); try { trackStreamCache[normalized] = System.currentTimeMillis() to found; persistStreamCacheEntry(normalized, found) } catch (_: Throwable) {}; return@use }
-                    } catch (_: Throwable) {}
-                    return@use
-                }
-            }
-        } catch (_: Throwable) { return null }
-        return found
-    }
-
+    /** Get stream URL for track */
     fun getStreamUrl(trackId: String): String? {
         if (trackId.isBlank()) return null
         val normalized = normalizeTrackIdForCache(trackId) ?: return null
@@ -172,7 +105,10 @@ class StreamResolver(
                     val effective = resp.request.url.toString()
                     if (!effective.equals(url, ignoreCase = true) && effective.startsWith("http") && !effective.contains("/api/stream")) {
                         result = effective
-                        try { trackStreamCache[normalized] = System.currentTimeMillis() to effective; persistStreamCacheEntry(normalized, effective) } catch (_: Throwable) {}
+                        try {
+                            trackStreamCache[normalized] = System.currentTimeMillis() to effective
+                            persistStreamCacheEntry(normalized, effective)
+                        } catch (_: Throwable) {}
                         return@use
                     }
                 } catch (_: Throwable) {}
@@ -180,7 +116,10 @@ class StreamResolver(
                 val loc = resp.header("Location")
                 if (!loc.isNullOrBlank()) {
                     result = loc
-                    try { trackStreamCache[normalized] = System.currentTimeMillis() to loc; persistStreamCacheEntry(normalized, loc) } catch (_: Throwable) {}
+                    try {
+                        trackStreamCache[normalized] = System.currentTimeMillis() to loc
+                        persistStreamCacheEntry(normalized, loc)
+                    } catch (_: Throwable) {}
                     return@use
                 }
 
@@ -192,7 +131,10 @@ class StreamResolver(
                     val resolved = sr.streamUrl ?: sr.url ?: sr.stream ?: sr.link
                     if (!resolved.isNullOrBlank()) {
                         result = resolved
-                        try { trackStreamCache[normalized] = System.currentTimeMillis() to resolved; persistStreamCacheEntry(normalized, resolved) } catch (_: Throwable) {}
+                        try {
+                            trackStreamCache[normalized] = System.currentTimeMillis() to resolved
+                            persistStreamCacheEntry(normalized, resolved)
+                        } catch (_: Throwable) {}
                         return@use
                     }
                 } catch (_: Throwable) {}
@@ -200,20 +142,12 @@ class StreamResolver(
                 val s = body.trim()
                 if (s.startsWith("http")) {
                     result = s
-                    try { trackStreamCache[normalized] = System.currentTimeMillis() to s; persistStreamCacheEntry(normalized, s) } catch (_: Throwable) {}
+                    try {
+                        trackStreamCache[normalized] = System.currentTimeMillis() to s
+                        persistStreamCacheEntry(normalized, s)
+                    } catch (_: Throwable) {}
                     return@use
                 }
-
-                try {
-                    val pattern = Pattern.compile("https?://[^\"'\\s<>]+", Pattern.CASE_INSENSITIVE)
-                    val matcher = pattern.matcher(s)
-                    if (matcher.find()) {
-                        val found = matcher.group()
-                        result = found
-                        try { trackStreamCache[normalized] = System.currentTimeMillis() to found; persistStreamCacheEntry(normalized, found) } catch (_: Throwable) {}
-                        return@use
-                    }
-                } catch (_: Throwable) {}
             }
         } catch (_: Throwable) { return null }
 
@@ -221,4 +155,3 @@ class StreamResolver(
         return null
     }
 }
-

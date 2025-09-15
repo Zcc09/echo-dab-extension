@@ -11,10 +11,11 @@ import java.net.URLEncoder
 import okhttp3.OkHttpClient
 import dev.brahmkshatriya.echo.common.settings.Settings
 import java.util.concurrent.TimeUnit
-import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import dev.brahmkshatriya.echo.extension.Converter
+import dev.brahmkshatriya.echo.extension.utils.RequestUtils
+import dev.brahmkshatriya.echo.extension.utils.JsonParsingUtils
 import kotlinx.coroutines.runBlocking
 
 class PlaylistService(
@@ -23,27 +24,19 @@ class PlaylistService(
     private val converter: Converter,
     private val settings: Settings
 ) {
+    // Use consolidated utilities
+    private val requestUtils: RequestUtils by lazy { RequestUtils(settings) }
+    private val jsonParsingUtils: JsonParsingUtils by lazy { JsonParsingUtils(json, converter) }
+
     private val playlistCache = mutableMapOf<String, Pair<Long, List<Track>>>()
     private val CACHE_TTL_MS = 2 * 60 * 1000L
     private var playlistsCache: Pair<Long, List<Playlist>>? = null
     private val PLAYLISTS_CACHE_TTL_MS = 60 * 1000L
 
-    private fun cookieHeaderValue(): String? {
-        val raw = settings.getString("session_cookie") ?: return null
-        val firstPart = raw.split(';').firstOrNull()?.trim() ?: return null
-        if (firstPart.isEmpty()) return null
-        return if (firstPart.contains('=')) firstPart else "session=$firstPart"
-    }
-
-    // Check if user is logged in (has valid session cookie)
-    private fun isLoggedIn(): Boolean {
-        return !cookieHeaderValue().isNullOrBlank()
-    }
-
+    /** Get cached tracks for playlist if valid */
     fun getCachedTracksForPlaylist(playlistId: String): List<Track>? {
-        // Only return cached data if user is still logged in
-        if (!isLoggedIn()) {
-            playlistCache.clear() // Clear cache when logged out
+        if (!requestUtils.isLoggedIn()) {
+            playlistCache.clear()
             return null
         }
 
@@ -51,84 +44,58 @@ class PlaylistService(
         return if (System.currentTimeMillis() - entry.first <= CACHE_TTL_MS) entry.second else null
     }
 
+    /** Fetch tracks for playlist with caching */
     suspend fun fetchTracksForPlaylistSync(playlist: Playlist, pageIndex: Int = 1, pageSize: Int = 1000): List<Track> {
         return withContext(Dispatchers.IO) {
-            // Require authentication for playlists
-            if (!isLoggedIn()) {
+            if (!requestUtils.isLoggedIn()) {
                 playlistCache.clear()
-                Log.d("PlaylistService", "Not logged in, returning empty tracks for playlist=${playlist.id}")
                 return@withContext emptyList()
             }
 
             val now = System.currentTimeMillis()
             val cacheEntry = playlistCache[playlist.id]
             if (cacheEntry != null && now - cacheEntry.first <= CACHE_TTL_MS) {
-                Log.d("PlaylistService", "Returning cached ${cacheEntry.second.size} tracks for playlist=${playlist.id}")
                 return@withContext cacheEntry.second
             }
 
-            Log.d("PlaylistService", "Fetching tracks for playlist=${playlist.id}, title='${playlist.title}'")
-
-            // Use correct API endpoint according to DAB API spec: /libraries/{id}
             val correctEndpoint = "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}"
             val requestUrl = "$correctEndpoint?page=$pageIndex&limit=$pageSize"
 
-            // Use longer timeout for more reliable fetching
             val clientRobust = httpClient.newBuilder().callTimeout(10000, TimeUnit.MILLISECONDS).build()
 
             try {
-                Log.d("PlaylistService", "Using correct API endpoint: $requestUrl")
-
-                val rb = okhttp3.Request.Builder().url(requestUrl)
-                val cookie = cookieHeaderValue()
-                if (!cookie.isNullOrBlank()) rb.header("Cookie", cookie)
-                rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
-
-                clientRobust.newCall(rb.build()).execute().use { resp ->
-                    Log.d("PlaylistService", "Response: ${resp.code} ${resp.message} for $requestUrl")
-
+                val req = requestUtils.newRequestBuilder(requestUrl).build()
+                clientRobust.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) {
-                        // Clear invalid session on auth errors
+                        requestUtils.clearSessionOnAuthFailure(resp.code)
                         if (resp.code == 401 || resp.code == 403) {
-                            Log.w("PlaylistService", "Authentication failed, clearing session")
-                            settings.putString("session_cookie", null)
                             playlistCache.clear()
                             playlistsCache = null
                         }
-                        Log.w("PlaylistService", "Request failed with ${resp.code}")
                         return@withContext emptyList()
                     }
 
                     val body = resp.body?.string()
                     if (body.isNullOrEmpty()) {
-                        Log.d("PlaylistService", "Empty response body")
                         return@withContext emptyList()
                     }
 
-                    Log.d("PlaylistService", "Response body length: ${body.length} chars")
-                    Log.v("PlaylistService", "Response body preview: ${body.take(200)}...")
-
                     val tracks = parseLibraryResponse(body)
-                    Log.d("PlaylistService", "Parsed ${tracks.size} tracks from response")
 
                     if (tracks.isNotEmpty()) {
                         playlistCache[playlist.id] = now to tracks
-                        Log.i("PlaylistService", "SUCCESS: Found ${tracks.size} tracks for playlist=${playlist.id}")
                         return@withContext tracks
                     }
                 }
-            } catch (e: Throwable) {
-                Log.w("PlaylistService", "Exception calling correct endpoint: ${e.message}")
-            }
+            } catch (e: Throwable) { }
 
-            Log.w("PlaylistService", "FAILED: No tracks found for playlist=${playlist.id}")
             playlistCache[playlist.id] = now to emptyList()
             emptyList()
         }
     }
 
+    /** Parse DAB library response to tracks using consolidated utilities */
     private fun parseLibraryResponse(body: String): List<Track> {
-        // Try correct DAB API response format first
         try {
             val response: dev.brahmkshatriya.echo.extension.models.DabLibraryResponse = json.decodeFromString(body)
             response.library?.tracks?.let { tracks ->
@@ -136,117 +103,20 @@ class PlaylistService(
                     try { converter.toTrack(track) } catch (_: Throwable) { null }
                 }
             }
-        } catch (e: Throwable) {
-            Log.d("PlaylistService", "Failed to parse as DabLibraryResponse: ${e.message}")
-        }
+        } catch (e: Throwable) { }
 
-        // Fallback to legacy parsing
-        return parseTracksFromBody(body)
-    }
-
-    private fun parseTracksFromBody(body: String): List<Track> {
-        // Try typed decode first
-        try {
-            val lib: dev.brahmkshatriya.echo.extension.models.DabLibrary = json.decodeFromString(body)
-            return lib.tracks.mapNotNull { t -> try { converter.toTrack(t) } catch (_: Throwable) { null } }
-        } catch (_: Throwable) { }
-
-        // Use enhanced JSON parsing (consolidated from ParserService)
+        // Fallback to consolidated parsing
         try {
             val root = json.parseToJsonElement(body)
-            return parseTracksFromJsonElement(root)
+            return jsonParsingUtils.parseTracksFromResponse(root)
         } catch (_: Throwable) { }
 
         return emptyList()
     }
 
-    // Enhanced JSON element parsing (integrated from ParserService, removing redundancy)
-    private fun parseTracksFromJsonElement(root: kotlinx.serialization.json.JsonElement): List<Track> {
-        val out = mutableListOf<Track>()
-
-        fun visit(el: kotlinx.serialization.json.JsonElement) {
-            when (el) {
-                is JsonObject -> {
-                    // Try direct track object parsing
-                    val direct = tryParseElementAsTrack(el)
-                    if (direct != null) {
-                        out.add(converter.toTrack(direct))
-                        return
-                    }
-
-                    // Check common array containers with expanded candidates
-                    val candidates = listOf("tracks", "data", "items", "results", "favorites", "library", "content")
-                    for (key in candidates) {
-                        val arr = el[key] as? JsonArray
-                        if (arr != null) {
-                            for (item in arr) {
-                                if (item is JsonObject) {
-                                    val parsed = tryParseElementAsTrack(item)
-                                    if (parsed != null) out.add(converter.toTrack(parsed))
-                                }
-                            }
-                            if (out.isNotEmpty()) return
-                        }
-                    }
-                }
-                is JsonArray -> {
-                    for (item in el) {
-                        if (item is JsonObject) {
-                            val parsed = tryParseElementAsTrack(item)
-                            if (parsed != null) out.add(converter.toTrack(parsed))
-                        }
-                    }
-                }
-                else -> { /* Handle other types if needed */ }
-            }
-        }
-
-        try { visit(root) } catch (_: Throwable) { }
-        return out
-    }
-
-    // Enhanced track parsing (removing duplicate logic)
-    private fun tryParseElementAsTrack(el: JsonObject): dev.brahmkshatriya.echo.extension.models.DabTrack? {
-        return try {
-            json.decodeFromJsonElement(dev.brahmkshatriya.echo.extension.models.DabTrack.serializer(), el)
-        } catch (_: Throwable) {
-            // Enhanced manual fallback with more field variations
-            val idEl = el["id"] ?: el["trackId"] ?: el["track_id"] ?: el["track"] ?: return null
-            val idStr = (idEl as? JsonPrimitive)?.content ?: idEl.toString()
-            val idInt = idStr.toIntOrNull() ?: return null
-
-            val title = (el["title"] as? JsonPrimitive)?.content
-                ?: (el["name"] as? JsonPrimitive)?.content ?: ""
-            val artist = (el["artist"] as? JsonPrimitive)?.content
-                ?: (el["artistName"] as? JsonPrimitive)?.content ?: ""
-            val artistId = (el["artistId"] as? JsonPrimitive)?.content?.toIntOrNull()
-            val albumTitle = (el["albumTitle"] as? JsonPrimitive)?.content
-                ?: (el["album"] as? JsonPrimitive)?.content
-            val albumCover = (el["albumCover"] as? JsonPrimitive)?.content
-            val albumId = (el["albumId"] as? JsonPrimitive)?.content
-            val releaseDate = (el["releaseDate"] as? JsonPrimitive)?.content
-            val genre = (el["genre"] as? JsonPrimitive)?.content
-            val duration = (el["duration"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
-
-            dev.brahmkshatriya.echo.extension.models.DabTrack(
-                id = idInt,
-                title = title,
-                artist = artist,
-                artistId = artistId,
-                albumTitle = albumTitle,
-                albumCover = albumCover,
-                albumId = albumId,
-                releaseDate = releaseDate,
-                genre = genre,
-                duration = duration,
-                audioQuality = null
-            )
-        }
-    }
-
+    /** Fetch library playlists with pagination */
     fun fetchLibraryPlaylistsPage(pageIndex: Int = 1, pageSize: Int = 50, includeCovers: Boolean = true): List<Playlist> {
-        // Require authentication for playlists
-        if (!isLoggedIn()) {
+        if (!requestUtils.isLoggedIn()) {
             playlistsCache = null
             return emptyList()
         }
@@ -263,16 +133,11 @@ class PlaylistService(
 
         for (url in candidates) {
             try {
-                val rb = okhttp3.Request.Builder().url(url)
-                val cookie = cookieHeaderValue()
-                if (!cookie.isNullOrBlank()) rb.header("Cookie", cookie)
-                rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
-
-                httpClient.newCall(rb.build()).execute().use { resp ->
+                val req = requestUtils.newRequestBuilder(url).build()
+                httpClient.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) {
-                        // Clear invalid session on auth errors
+                        requestUtils.clearSessionOnAuthFailure(resp.code)
                         if (resp.code == 401 || resp.code == 403) {
-                            settings.putString("session_cookie", null)
                             playlistsCache = null
                             playlistCache.clear()
                         }
@@ -294,19 +159,16 @@ class PlaylistService(
         return emptyList()
     }
 
+    /** Parse playlists from response body */
     private fun parsePlaylistsFromBody(body: String): List<Playlist> {
         try {
             val root = json.parseToJsonElement(body)
             val list = mutableListOf<Playlist>()
 
-            val arr = when (root) {
-                is JsonArray -> root
-                is JsonObject -> {
-                    val keys = listOf("libraries", "playlists", "data", "items", "results")
-                    keys.firstNotNullOfOrNull { root[it] as? JsonArray }
-                }
-                else -> null
-            }
+            val arr = jsonParsingUtils.findArrayInJson(
+                root,
+                listOf("libraries", "playlists", "data", "items", "results")
+            )
 
             arr?.forEach { el ->
                 if (el is JsonObject) {
@@ -314,7 +176,6 @@ class PlaylistService(
                         val dp = json.decodeFromJsonElement(dev.brahmkshatriya.echo.extension.models.DabPlaylist.serializer(), el)
                         list.add(converter.toPlaylist(dp))
                     } catch (_: Throwable) {
-                        // Manual parsing fallback
                         val id = extractStringValue(el, "id", "playlistId", "libraryId", "slug")
                         val title = extractStringValue(el, "name", "title", "label") ?: "Playlist"
                         val tc = extractStringValue(el, "trackCount", "count")?.toIntOrNull() ?: 0
@@ -337,6 +198,7 @@ class PlaylistService(
         return emptyList()
     }
 
+    /** Extract string value from JSON object by trying multiple keys */
     private fun extractStringValue(obj: JsonObject, vararg keys: String): String? {
         for (key in keys) {
             val value = (obj[key] as? JsonPrimitive)?.content
@@ -345,6 +207,7 @@ class PlaylistService(
         return null
     }
 
+    /** Add covers to playlists from their tracks */
     private fun augmentPlaylistsWithCovers(playlists: MutableList<Playlist>) {
         for (i in playlists.indices) {
             val p = playlists[i]
@@ -357,7 +220,6 @@ class PlaylistService(
                 val latestCover = tracks.firstOrNull()?.cover
                 if (latestCover != null) {
                     playlists[i] = p.copy(cover = latestCover)
-                    Log.d("PlaylistService", "Set playlist=${p.id} cover from track")
                 }
             } catch (_: Throwable) { }
         }

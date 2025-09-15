@@ -16,6 +16,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import java.util.regex.Pattern
 
 class Converter {
 
@@ -23,7 +24,7 @@ class Converter {
 
     private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
 
-    // Precompile regexes used frequently to avoid repeated allocations
+    // Precompiled regexes for performance
     private companion object {
         val LRC_LINE_REGEX = Regex("\\[(\\d+):(\\d{2})(?:[.:](\\d{1,3}))?](.*)")
         val BRACKET_TIMESTAMP_REGEX = Regex("[\\[(]\\s*\\d{1,2}:\\d{2}(?:[.:]\\d{1,3})?\\s*[)\\]]")
@@ -34,6 +35,7 @@ class Converter {
         val MULTI_NEWLINE_REGEX = Regex("(?:\\n\\s*){2,}")
     }
 
+    /** Convert DAB user to Echo user model */
     fun toUser(user: DabUser): User {
         return User(
             id = user.id.toString(),
@@ -41,6 +43,7 @@ class Converter {
         )
     }
 
+    /** Convert DAB playlist to Echo playlist model */
     fun toPlaylist(playlist: DabPlaylist): Playlist {
         return Playlist(
             id = playlist.id,
@@ -48,23 +51,15 @@ class Converter {
             authors = listOf(Artist(id = "user", name = "You")),
             isEditable = false,
             trackCount = playlist.trackCount.toLong(),
-            // Generate a deterministic placeholder color cover based on playlist id/name
             cover = null
         )
     }
 
-
-
+    /** Convert DAB track to Echo track model */
     fun toTrack(track: DabTrack): Track {
         val streamUrl = "https://dab.yeet.su/api/stream?trackId=${track.id}"
 
-        val finalStreamUrl = streamUrl
-
-        track.audioQuality?.let { aq ->
-
-        }
-
-        // Determine a simple numeric quality for sorting and a human-readable file format
+        // Determine audio quality metrics
         val (quality, qualityDescription) = run {
             val aq = track.audioQuality
             if (aq == null) {
@@ -74,14 +69,12 @@ class Converter {
                 val sampleRate = aq.maximumSamplingRate
                 val isHiRes = aq.isHiRes
 
-                // Simple numeric quality used for sorting only (smaller range)
                 val numericQuality = when {
                     isHiRes -> 3
                     bitDepth >= 16 && sampleRate >= 44.1 -> 2
                     else -> 1
                 }
 
-                // Map basic characteristics to a likely container/format string
                 val format = when {
                     isHiRes -> "FLAC"
                     bitDepth >= 16 && sampleRate >= 44.1 -> "FLAC"
@@ -95,11 +88,9 @@ class Converter {
         val artist = Artist(
             id = track.artistId?.toString() ?: track.artist,
             name = track.artist,
-            // Prefer album cover as a fallback for artist image to avoid API call here
             cover = track.albumCover?.toImageHolder()
         )
 
-        // Create album with cover for info tab
         val album = track.albumTitle?.let {
             Album(
                 id = track.albumId ?: it,
@@ -115,16 +106,13 @@ class Converter {
             cover = track.albumCover?.toImageHolder(),
             artists = listOf(artist),
             album = album,
-            // Provide a lightweight placeholder Streamable so the player has an item to
-            // request media for. This avoids eagerly resolving CDN URLs while allowing
-            // the player to call loadStreamableMedia when it needs to play a track.
             streamables = listOf(
                 Streamable.server(
                     id = track.id.toString(),
                     quality = quality,
                     extras = mapOf(
                         "dab_id" to track.id.toString(),
-                        "stream_url" to finalStreamUrl,
+                        "stream_url" to streamUrl,
                         "qualityDescription" to qualityDescription,
                         "bitDepth" to (track.audioQuality?.maximumBitDepth?.toString() ?: "Unknown"),
                         "sampleRate" to (track.audioQuality?.maximumSamplingRate?.toString() ?: "Unknown"),
@@ -136,11 +124,9 @@ class Converter {
         )
     }
 
-    // Map an Echo Track to a DAB-compatible JSON object for POSTing to /favorites
+    /** Convert Echo track to DAB-compatible JSON for API requests */
     fun toDabTrackJson(track: Track): JsonObject {
         return buildJsonObject {
-            // Some DAB servers expect a numeric `id`. Send a numeric id when the track.id is parseable,
-            // but always include a string `trackId` alias to be robust across deployments.
             val idNum = track.id.toLongOrNull()
             if (idNum != null) put("id", JsonPrimitive(idNum)) else put("id", JsonPrimitive(track.id))
             put("trackId", JsonPrimitive(track.id))
@@ -172,7 +158,7 @@ class Converter {
             track.extras["releaseDate"]?.let { put("releaseDate", JsonPrimitive(it)) }
             track.extras["genre"]?.let { put("genre", JsonPrimitive(it)) }
 
-            // audioQuality
+            // Audio quality metadata
             val bitDepth = track.extras["bitDepth"]
             val sampleRate = track.extras["sampleRate"]
             val isHiRes = track.extras["isHiRes"]
@@ -194,6 +180,7 @@ class Converter {
         }
     }
 
+    /** Convert DAB album to Echo album model */
     fun toAlbum(album: dev.brahmkshatriya.echo.extension.models.DabAlbum): Album {
         return Album(
             id = album.id,
@@ -201,10 +188,9 @@ class Converter {
             cover = album.cover?.toImageHolder(),
             artists = listOf(Artist(id = album.artistId?.toString() ?: album.artist, name = album.artist)),
             trackCount = album.trackCount.toLong(),
-            duration = album.tracks?.sumOf { it.duration * 1000L }, // Convert to milliseconds
+            duration = album.tracks?.sumOf { it.duration * 1000L },
             releaseDate = album.releaseDate?.let {
                 try {
-                    // Try to parse different date formats
                     when {
                         it.contains("-") -> {
                             val parts = it.split("-")
@@ -254,12 +240,13 @@ class Converter {
         )
     }
 
+    /** Convert DAB artist to Echo artist model */
     fun toArtist(artist: dev.brahmkshatriya.echo.extension.models.DabArtist): Artist {
         return Artist(
             id = artist.id.toString(),
             name = artist.name,
             cover = artist.picture?.toImageHolder(),
-            bio = null, // DAB API doesn't provide bio in basic artist info
+            bio = null,
             subtitle = null,
             extras = mapOf(
                 "dab_id" to artist.id.toString(),
@@ -268,11 +255,13 @@ class Converter {
         )
     }
 
+    /** Convert text to Lyrics object with smart parsing */
     fun toLyricFromText(text: String?): Lyrics.Lyric? {
         if (text == null) return null
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return null
 
+        // Try LRC format parsing
         try {
             val matches = LRC_LINE_REGEX.findAll(trimmed).toList()
             if (matches.isNotEmpty()) {
@@ -296,29 +285,25 @@ class Converter {
                 }
                 return Lyrics.Timed(items)
             }
-        } catch (_: Throwable) {
-            // LRC parsing failed -> continue to other parsers
-        }
+        } catch (_: Throwable) { }
 
-        // JSON-shaped lyrics parsing
+        // Try JSON format parsing
         try {
             val elem = json.parseToJsonElement(trimmed)
             val lyricFromJson = parseJsonElementToLyric(elem)
             if (lyricFromJson != null) return lyricFromJson
-        } catch (_: Throwable) {
-            // not JSON or parse failed - fallthrough to plain text
-        }
+        } catch (_: Throwable) { }
 
-        // Fallback: cleaned plain text
+        // Fallback to plain text
         val cleaned = stripLrcTimestamps(trimmed)
         return Lyrics.Simple(cleaned)
     }
 
+    /** Parse JSON element to lyrics */
     private fun parseJsonElementToLyric(elem: kotlinx.serialization.json.JsonElement): Lyrics.Lyric? {
         when (elem) {
             is JsonArray -> return parseJsonArrayToLyric(elem)
             is JsonObject -> {
-                // Try to find arrays inside object
                 val arr = when {
                     elem["lyrics"] is JsonArray -> elem["lyrics"] as JsonArray
                     elem["lines"] is JsonArray -> elem["lines"] as JsonArray
@@ -332,17 +317,16 @@ class Converter {
         return null
     }
 
+    /** Parse JSON array to timed lyrics */
     private fun parseJsonArrayToLyric(arr: JsonArray): Lyrics.Lyric? {
         val timedItems = mutableListOf<Lyrics.Item>()
         val wordGroups = mutableListOf<List<Lyrics.Item>>()
 
         for (el in arr) {
             when (el) {
-                is JsonPrimitive -> {
-                    // primitive line without timing - skip
-                }
+                is JsonPrimitive -> { }
                 is JsonObject -> {
-                    // detect word-by-word structure
+                    // Word-by-word timing
                     val wordsEl = el["words"] ?: el["lineWords"] ?: el["wordTiming"]
                     if (wordsEl is JsonArray) {
                         val group = mutableListOf<Lyrics.Item>()
@@ -361,7 +345,7 @@ class Converter {
                         continue
                     }
 
-                    // detect timed line
+                    // Line timing
                     val timeStr = (el["time"] as? JsonPrimitive)?.content ?: (el["start"] as? JsonPrimitive)?.content ?: (el["timestamp"] as? JsonPrimitive)?.content ?: (el["t"] as? JsonPrimitive)?.content
                     val text = (el["text"] as? JsonPrimitive)?.content ?: (el["line"] as? JsonPrimitive)?.content ?: (el["lyrics"] as? JsonPrimitive)?.content ?: el.values.filterIsInstance<JsonPrimitive>().joinToString(" ") { it.content }
                     if (timeStr != null) {
@@ -370,7 +354,7 @@ class Converter {
                         timedItems.add(item)
                     }
                 }
-                else -> { /* ignore */ }
+                else -> { }
             }
         }
 
@@ -386,9 +370,10 @@ class Converter {
         return null
     }
 
+    /** Parse time string to milliseconds */
     private fun parseTimeToMillis(time: String): Long? {
         val trimmed = time.trim()
-        // numeric seconds
+        // Numeric seconds
         val asDouble = trimmed.toDoubleOrNull()
         if (asDouble != null) return (asDouble * 1000).toLong()
 
@@ -413,18 +398,14 @@ class Converter {
         return null
     }
 
+    /** Remove LRC timestamps from text */
     private fun stripLrcTimestamps(input: String): String {
         if (input.isBlank()) return ""
 
-        // Remove simple HTML tags first
         var s = input.replace(Regex("<[^>]+>"), " ")
-
         s = s.replace(BRACKET_TIMESTAMP_REGEX, " ")
-
         s = s.replace(FULL_HMS_REGEX, " ")
-
         s = s.replace(MMSS_REGEX, " ")
-
         s = s.lines().joinToString("\n") { line ->
             line.replace(LEADING_SEPARATORS_REGEX, "").trim()
         }
@@ -434,8 +415,37 @@ class Converter {
         return s.trim()
     }
 
+    /** Clean plain text by removing timestamps */
     fun cleanPlainText(text: String?): String {
         if (text == null) return ""
         return stripLrcTimestamps(text)
+    }
+
+    /** Convert Echo track back to DAB track model for API operations */
+    fun toDabTrack(track: Track): DabTrack {
+        val idInt = track.id.toIntOrNull() ?: 0
+        val firstArtist = track.artists.firstOrNull()
+
+        return DabTrack(
+            id = idInt,
+            title = track.title,
+            artist = firstArtist?.name ?: "",
+            artistId = firstArtist?.id?.toIntOrNull(),
+            albumTitle = track.album?.title,
+            albumCover = track.cover?.let { cover ->
+                try {
+                    when (cover) {
+                        is dev.brahmkshatriya.echo.common.models.ImageHolder.NetworkRequestImageHolder -> cover.request.url
+                        is dev.brahmkshatriya.echo.common.models.ImageHolder.ResourceUriImageHolder -> cover.uri
+                        else -> null
+                    }
+                } catch (_: Throwable) { null }
+            },
+            albumId = track.album?.id,
+            releaseDate = track.extras["releaseDate"],
+            genre = track.extras["genre"],
+            duration = (track.duration?.div(1000))?.toInt() ?: 0,
+            audioQuality = null
+        )
     }
 }

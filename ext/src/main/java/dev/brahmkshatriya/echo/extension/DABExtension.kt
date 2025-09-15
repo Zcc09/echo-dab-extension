@@ -58,10 +58,10 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
     override suspend fun getSettingItems(): List<Setting> = emptyList()
 
+    /** Initialize extension and validate existing session */
     override suspend fun onInitialize() {
         val sessionCookie = settings.getString("session_cookie")
         if (sessionCookie != null && currentUser == null) {
-            // Validate the session is still active
             currentUser = withContext(Dispatchers.IO) {
                 runCatching {
                     if (api.hasValidSession()) {
@@ -72,7 +72,6 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 }.getOrNull()
             }
             if (currentUser == null) {
-                // Clear invalid session
                 settings.putString("session_cookie", null)
             }
         }
@@ -83,6 +82,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     // --- TrackClient ---
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track = track
 
+    /** Load streamable media URL for track playback */
     override suspend fun loadStreamableMedia(
         streamable: Streamable,
         isDownload: Boolean
@@ -95,34 +95,18 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 val cachedUrl = api.getCachedStreamUrl(candidate)
                 if (!cachedUrl.isNullOrBlank()) return@withContext cachedUrl
 
-                if (candidate.startsWith(
-                        "http",
-                        ignoreCase = true
-                    ) && !candidate.contains("/api/stream")
-                ) {
+                if (candidate.startsWith("http", ignoreCase = true) && !candidate.contains("/api/stream")) {
                     return@withContext candidate
                 }
 
-                // Try stream resolution
                 val resolved = api.getStreamUrl(candidate)
                 if (!resolved.isNullOrBlank()) return@withContext resolved
 
-                // Fallback
                 if (candidate.startsWith("http", ignoreCase = true)) candidate
-                else "https://dab.yeet.su/api/stream?trackId=${
-                    URLEncoder.encode(
-                        candidate,
-                        "UTF-8"
-                    )
-                }"
+                else "https://dab.yeet.su/api/stream?trackId=${URLEncoder.encode(candidate, "UTF-8")}"
             } catch (_: Throwable) {
                 if (candidate.startsWith("http", ignoreCase = true)) candidate
-                else "https://dab.yeet.su/api/stream?trackId=${
-                    URLEncoder.encode(
-                        candidate,
-                        "UTF-8"
-                    )
-                }"
+                else "https://dab.yeet.su/api/stream?trackId=${URLEncoder.encode(candidate, "UTF-8")}"
             }
         }
 
@@ -134,6 +118,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     // --- LyricsClient ---
     override suspend fun loadLyrics(lyrics: Lyrics): Lyrics = lyrics
 
+    /** Search for track lyrics by artist and title */
     override suspend fun searchTrackLyrics(clientId: String, track: Track): Feed<Lyrics> {
         val artist = track.artists.firstOrNull()?.name ?: return emptyList<Lyrics>().toFeed()
         val lyricsText = withContext(Dispatchers.IO) {
@@ -155,16 +140,15 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         ).toFeed()
     }
 
-
     // --- PlaylistClient ---
     override suspend fun loadPlaylist(playlist: Playlist): Playlist = playlist
 
+    /** Load all tracks for a playlist */
     override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
         try {
             val tracks: PagedData<Track> = api.getPlaylistTracks(playlist, 1000)
             val trackList = tracks.loadAll()
             if (trackList.isEmpty()) {
-                // Try direct fetch as fallback
                 val directTracks = try {
                     withContext(Dispatchers.IO) {
                         api.fetchAllPlaylistTracks(playlist, 1000)
@@ -180,6 +164,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         }
     }
 
+    /** Load playlist feed with tracks shelf */
     override suspend fun loadFeed(playlist: Playlist): Feed<Shelf>? {
         try {
             val tracksList = try {
@@ -206,6 +191,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         }
     }
 
+    /** Load search feed with tabs for different content types */
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
         if (query.isBlank()) {
             return emptyList<Shelf>().toFeed()
@@ -215,66 +201,53 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 "all" -> {
                     val pagedAll: PagedData<Shelf> = PagedData.Single {
                         try {
-
-                            // Use unified search endpoint for all types
                             val (tracks, albums, artists) = withContext(Dispatchers.IO) {
                                 api.searchAll(query, 20)
                             }
 
                             val shelves = mutableListOf<Shelf>()
 
-                            // Add tracks shelf if we have results
                             if (tracks.isNotEmpty()) {
                                 shelves.add(
                                     Shelf.Lists.Items(
                                         id = "search_all_tracks",
                                         title = "Tracks",
                                         list = tracks.take(20),
-                                        type = Shelf.Lists.Type.Grid // Limit for "All" view
+                                        type = Shelf.Lists.Type.Grid
                                     )
                                 )
                             }
 
-                            // Add albums shelf if we have results
                             if (albums.isNotEmpty()) {
                                 shelves.add(
                                     Shelf.Lists.Items(
                                         id = "search_all_albums",
                                         title = "Albums",
-                                        list = albums.take(20), // Limit for "All" view
+                                        list = albums.take(20),
                                         type = Shelf.Lists.Type.Grid
                                     )
                                 )
                             }
 
-                            // Add artists shelf if we have results
                             if (artists.isNotEmpty()) {
                                 shelves.add(
                                     Shelf.Lists.Items(
                                         id = "search_all_artists",
                                         title = "Artists",
-                                        list = artists.take(20), // Limit for "All" view
+                                        list = artists.take(20),
                                         type = Shelf.Lists.Type.Grid
                                     )
                                 )
                             }
 
-                            // Fallback: If albums/artists are empty, run separate searches
+                            // Fallback searches if unified search didn't return albums/artists
                             if (albums.isEmpty() || artists.isEmpty()) {
-                                val fallbackAlbums =
-                                    if (albums.isEmpty()) withContext(Dispatchers.IO) {
-                                        api.searchAlbums(
-                                            query,
-                                            10
-                                        )
-                                    } else emptyList()
-                                val fallbackArtists =
-                                    if (artists.isEmpty()) withContext(Dispatchers.IO) {
-                                        api.searchArtists(
-                                            query,
-                                            10
-                                        )
-                                    } else emptyList()
+                                val fallbackAlbums = if (albums.isEmpty()) withContext(Dispatchers.IO) {
+                                    api.searchAlbums(query, 10)
+                                } else emptyList()
+                                val fallbackArtists = if (artists.isEmpty()) withContext(Dispatchers.IO) {
+                                    api.searchArtists(query, 10)
+                                } else emptyList()
                                 if (fallbackAlbums.isNotEmpty()) {
                                     shelves.add(
                                         Shelf.Lists.Items(
@@ -306,22 +279,28 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 }
 
                 "tracks" -> {
-                    val pagedTracks: PagedData<Shelf> = PagedData.Single {
-                        try {
-                            val tracks = withContext(Dispatchers.IO) {
-                                api.searchTracks(query, 50)
-                            }
-                            if (tracks.isEmpty()) {
-                                emptyList()
-                            } else {
-                                // List each track as a Shelf.Item, just like the library tracks tab
-                                tracks.map { Shelf.Item(it) }
-                            }
-                        } catch (e: Throwable) {
-                            emptyList()
-                        }
+                    val rawTracks = try { withContext(Dispatchers.IO) { api.searchTracks(query, 50) } } catch (_: Throwable) { emptyList<Track>() }
+                    if (rawTracks.isEmpty()) {
+                        Feed.Data(PagedData.empty())
+                    } else {
+                        val layoutExtras = mapOf(
+                            "preferred_layout" to "grid_if_wide",
+                            "preferred_padding" to "16",
+                            "preferred_item_spacing" to "8"
+                        )
+                        val modified = rawTracks.map { it.copy(extras = it.extras + layoutExtras) }
+                        val pagedTracks: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
+                        Feed.Data(
+                            pagedData = pagedTracks,
+                            buttons = Feed.Buttons(
+                                showSearch = true,
+                                showSort = true,
+                                showPlayAndShuffle = true,
+                                customTrackList = modified
+                            ),
+                            background = null
+                        )
                     }
-                    Feed.Data(pagedTracks)
                 }
 
                 "albums" -> {
@@ -382,6 +361,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     }
 
     // --- AlbumClient ---
+    /** Load complete album details including tracks */
     override suspend fun loadAlbum(album: Album): Album {
         val dabAlbum = withContext(Dispatchers.IO) {
             api.getAlbum(album.id)
@@ -391,6 +371,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         return result
     }
 
+    /** Load all tracks for an album */
     override suspend fun loadTracks(album: Album): Feed<Track>? {
         val dabAlbum = withContext(Dispatchers.IO) {
             api.getAlbum(album.id)
@@ -403,6 +384,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         return tracks.toFeed()
     }
 
+    /** Load album feed with tracks shelf */
     override suspend fun loadFeed(album: Album): Feed<Shelf>? {
         val dabAlbum = withContext(Dispatchers.IO) {
             api.getAlbum(album.id)
@@ -423,6 +405,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     }
 
     // --- ArtistClient ---
+    /** Load artist details */
     override suspend fun loadArtist(artist: Artist): Artist {
         val dabArtist = withContext(Dispatchers.IO) {
             api.getArtistDetails(artist.id)
@@ -432,6 +415,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         return result
     }
 
+    /** Load artist feed with discography */
     override suspend fun loadFeed(artist: Artist): Feed<Shelf> {
         val albums = withContext(Dispatchers.IO) {
             api.getArtistDiscography(artist.id)
@@ -476,6 +460,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
             )
         )
 
+    /** Handle user login and save session */
     override suspend fun onLogin(key: String, data: Map<String, String?>): List<User> {
         val email = data["email"] ?: error("Email is required")
         val password = data["password"] ?: error("Password is required")
@@ -484,9 +469,9 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         return listOf(user)
     }
 
+    /** Set or clear current user */
     override fun setLoginUser(user: User?) {
         if (user == null) {
-            // Clear all session data and reset state
             settings.putString("session_cookie", null)
             currentUser = null
             api.clearSession()
@@ -499,13 +484,12 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         }
     }
 
+    /** Get current authenticated user */
     override suspend fun getCurrentUser(): User? {
-        // First check if we have a cached user and valid session
         if (currentUser != null && api.hasValidSession()) {
             return currentUser
         }
 
-        // Try to initialize from stored session
         val sessionCookie = settings.getString("session_cookie")
         if (!sessionCookie.isNullOrBlank()) {
             currentUser = withContext(Dispatchers.IO) {
@@ -518,7 +502,6 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 }.getOrNull()
             }
             if (currentUser == null) {
-                // Clear invalid session
                 settings.putString("session_cookie", null)
             }
         }
@@ -526,6 +509,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         return currentUser
     }
 
+    /** Load playlist shelves with covers */
     private suspend fun loadPlaylistShelves(): List<Shelf>? {
         if (!api.hasValidSession()) return null
         val pls = try {
@@ -573,6 +557,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         }
     }
 
+    /** Load favorite tracks as shelves */
     private suspend fun loadFavoritesShelves(): List<Shelf>? {
         if (!api.hasValidSession()) return null
         val favs = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList<Track>() }
@@ -580,6 +565,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         return favs.map { Shelf.Item(it) }
     }
 
+    /** Load raw favorites list */
     private suspend fun loadFavoritesShelvesRaw(): List<Track>? {
         if (!api.hasValidSession()) return null
         val favs = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList<Track>() }
@@ -589,19 +575,13 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     }
 
     // --- LibraryFeedClient ---
+    /** Load user's library feed with tabs for different content types */
     override suspend fun loadLibraryFeed(): Feed<Shelf> {
-        // Check authentication first
         val user = getCurrentUser()
-        if (user == null || !api.hasValidSession()) {
-            throw ClientException.LoginRequired()
-        }
+        if (user == null || !api.hasValidSession()) throw ClientException.LoginRequired()
 
         return Feed(libraryTabs) { tab ->
-            // Double-check authentication for each tab load
-            if (getCurrentUser() == null || !api.hasValidSession()) {
-                throw ClientException.LoginRequired()
-            }
-
+            if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
             when (tab?.id) {
                 "all" -> {
                     supervisorScope {
@@ -610,18 +590,15 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                                 when (t.id) {
                                     "playlists" -> loadPlaylistShelves()
                                     "tracks" -> {
-                                        // For the 'all' tab, show favorites as a single grid shelf of tracks
-                                        val favs = loadFavoritesShelvesRaw()
-                                        if (favs != null && favs.isNotEmpty()) {
-                                            listOf(
-                                                Shelf.Lists.Tracks(
-                                                    id = "favorites_tracks_grid",
-                                                    title = "Favorites",
-                                                    list = favs,
-                                                    type = Shelf.Lists.Type.Grid
-                                                )
+                                        val favs = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList<Track>() }
+                                        if (favs.isNotEmpty()) listOf(
+                                            Shelf.Lists.Tracks(
+                                                id = "favorites_tracks_all",
+                                                title = "Favorites",
+                                                list = favs,
+                                                type = Shelf.Lists.Type.Grid
                                             )
-                                        } else null
+                                        ) else null
                                     }
                                     else -> null
                                 }
@@ -630,36 +607,43 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                         deferreds.mapNotNull { it.await() }.flatten()
                     }.toFeedData()
                 }
-
                 "playlists" -> {
-                    val shelves = try {
-                        withContext(Dispatchers.IO) { loadPlaylistShelves() }
-                    } catch (_: Throwable) {
-                        null
-                    }
+                    val shelves = try { withContext(Dispatchers.IO) { loadPlaylistShelves() } } catch (_: Throwable) { null }
                     (shelves ?: emptyList()).toFeedData()
                 }
-
                 "tracks" -> {
-                    val shelves = try {
-                        withContext(Dispatchers.IO) { loadFavoritesShelves() }
-                    } catch (_: Throwable) {
-                        null
+                    val favs = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList<Track>() }
+                    if (favs.isEmpty()) emptyList<Shelf>().toFeedData() else {
+                        val layoutExtras = mapOf(
+                            "preferred_layout" to "grid_if_wide", // hint for host to switch to grid in landscape / wide
+                            "preferred_padding" to "16",
+                            "preferred_item_spacing" to "8"
+                        )
+                        val modifiedTracks = favs.map { it.copy(extras = it.extras + layoutExtras) }
+                        val paged: PagedData<Shelf> = PagedData.Single { modifiedTracks.map { Shelf.Item(it) } }
+                        Feed.Data(
+                            pagedData = paged,
+                            buttons = Feed.Buttons(
+                                showSearch = true,
+                                showSort = true,
+                                showPlayAndShuffle = true,
+                                customTrackList = modifiedTracks
+                            ),
+                            background = null
+                        )
                     }
-                    (shelves ?: emptyList()).toFeedData()
                 }
-
                 else -> emptyList<Shelf>().toFeedData()
             }
         }
     }
 
     // --- LikeClient ---
+    /** Add or remove track from favorites */
     override suspend fun likeItem(item: EchoMediaItem, shouldLike: Boolean) {
-        // Only support Track for now
         val track = when (item) {
             is Track -> item
-            else -> return // Only tracks are likeable in DAB
+            else -> return
         }
         withContext(Dispatchers.IO) {
             if (shouldLike) {
@@ -670,6 +654,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         }
     }
 
+    /** Check if track is liked/favorited */
     override suspend fun isItemLiked(item: EchoMediaItem): Boolean {
         val track = when (item) {
             is Track -> item

@@ -6,6 +6,8 @@ import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.settings.Settings
 import dev.brahmkshatriya.echo.extension.models.*
+import dev.brahmkshatriya.echo.extension.utils.JsonParsingUtils
+import dev.brahmkshatriya.echo.extension.utils.RequestUtils
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -47,28 +49,28 @@ class DABApi(
     private val playlistService: PlaylistService by lazy { PlaylistService(httpClient, json, converter, settings) }
     private val favoritesService: FavoritesService by lazy { FavoritesService(httpClient, json, settings, converter) }
 
+    // Consolidated utilities
+    private val requestUtils: RequestUtils by lazy { RequestUtils(settings) }
+    private val jsonParsingUtils: JsonParsingUtils by lazy { JsonParsingUtils(json, converter) }
+
     // Session validation cache
     private var lastSessionCheck: Long = 0
     private var isSessionValid: Boolean = false
-    private val SESSION_CHECK_INTERVAL = 5 * 60 * 1000L // 5 minutes
+    private val SESSION_CHECK_INTERVAL = 5 * 60 * 1000L
 
     init {
         try { streamResolver.loadPersistentStreamCache() } catch (_: Throwable) { /* best-effort */ }
     }
 
+    /** Clean up resources */
     fun shutdown() {
         try { ioScope.cancel() } catch (_: Throwable) { }
     }
 
-    private fun cookieHeaderValue(): String? {
-        val raw = settings.getString("session_cookie") ?: return null
-        // Ensure we always return a single name=value cookie pair (strip attributes)
-        val firstPart = raw.split(';').firstOrNull()?.trim() ?: return null
-        if (firstPart.isEmpty()) return null
-        return if (firstPart.contains('=')) firstPart else "session=$firstPart"
-    }
+    /** Extract session cookie from settings */
+    private fun cookieHeaderValue(): String? = requestUtils.getCookieHeaderValue()
 
-    // Check if we have a valid session cookie
+    /** Check if user has valid session by validating with API */
     fun hasValidSession(): Boolean {
         val cookie = cookieHeaderValue()
         if (cookie.isNullOrBlank()) return false
@@ -97,24 +99,18 @@ class DABApi(
         }
     }
 
-    // Clear session data
+    /** Clear stored session data */
     fun clearSession() {
         settings.putString("session_cookie", null)
         isSessionValid = false
         lastSessionCheck = 0
     }
 
-    // Helper to create a Request.Builder with standard headers and optional cookie
-    private fun newRequestBuilder(url: String, includeCookie: Boolean = true): Request.Builder {
-        val rb = Request.Builder().url(url)
-        if (includeCookie) {
-            val cookie = cookieHeaderValue()
-            if (!cookie.isNullOrBlank()) rb.header("Cookie", cookie)
-        }
-        rb.header("Accept", "application/json").header("User-Agent", "EchoDAB-Extension/1.0")
-        return rb
-    }
+    /** Create HTTP request builder with standard headers */
+    private fun newRequestBuilder(url: String, includeCookie: Boolean = true): Request.Builder =
+        requestUtils.newRequestBuilder(url, includeCookie)
 
+    /** Login user and store session cookie */
     fun loginAndSaveCookie(email: String, pass: String): User {
         val loginRequest = DabLoginRequest(email, pass)
         val requestBody = json.encodeToString(DabLoginRequest.serializer(), loginRequest)
@@ -143,6 +139,7 @@ class DABApi(
         }
     }
 
+    /** Execute authenticated API request */
     private inline fun <reified T> executeAuthenticated(url: String): T {
         val req = newRequestBuilder(url).build()
         httpClient.newCall(req).execute().use { response ->
@@ -158,6 +155,7 @@ class DABApi(
         }
     }
 
+    /** Get current user info */
     fun getMe(): User {
         if (!hasValidSession()) {
             error("No valid session")
@@ -168,15 +166,12 @@ class DABApi(
 
     // Stream resolution delegates
     fun getCachedStreamUrl(trackId: String?): String? = streamResolver.getCachedStreamUrl(trackId)
-    fun resolveApiStreamEndpoint(endpointUrl: String): String? = streamResolver.resolveApiStreamEndpoint(endpointUrl)
-    fun quickResolveStreamUrl(trackId: String, timeoutMs: Long = 1000L): String? = streamResolver.quickResolveStreamUrl(trackId)
     fun getStreamUrl(trackId: String): String? = streamResolver.getStreamUrl(trackId)
 
     // Favorites delegates
-    fun getFavorites(limit: Int = 200, offset: Int = 0): List<Track> = favoritesService.getFavorites(limit, offset)
     fun getFavoritesAuthenticated(limit: Int = 200, offset: Int = 0): List<Track> = favoritesService.getFavoritesAuthenticated(limit, offset)
-    fun fetchFavoritesPage(pageIndex: Int = 1, pageSize: Int = 200): List<Track> = favoritesService.fetchFavoritesPage(pageIndex, pageSize)
 
+    /** Get album details by ID */
     fun getAlbum(albumId: String): DabAlbum? {
         return try {
             Log.d("DABApi", "Fetching album details for albumId: $albumId")
@@ -251,6 +246,7 @@ class DABApi(
         }
     }
 
+    /** Parse album data from JSON element */
     private fun parseAlbumFromJsonElement(root: JsonElement): DabAlbum? {
         return try {
             when (root) {
@@ -304,6 +300,7 @@ class DABApi(
         }
     }
 
+    /** Get song lyrics by artist and title */
     fun getLyrics(artist: String, title: String): String? {
         return try {
             val url = "https://dab.yeet.su/api/lyrics?artist=${URLEncoder.encode(artist, "UTF-8")}&title=${URLEncoder.encode(title, "UTF-8")}"
@@ -319,55 +316,52 @@ class DABApi(
         } catch (_: Throwable) { null }
     }
 
+    /** Add track to favorites */
     fun addFavorite(track: Track): Boolean {
-          val url = "https://dab.yeet.su/api/favorites"
-         try {
-             val bodyJson = converter.toDabTrackJson(track).toString()
-             val req1 = newRequestBuilder(url).post(bodyJson.toRequestBody("application/json".toMediaType())).build()
-             httpClient.newCall(req1).execute().use { resp ->
-                 if (resp.isSuccessful) {
-                     try { ioScope.launch { favoritesService.fetchFavoritesPage(1, 50) } } catch (_: Throwable) { }
-                     return true
-                 }
-             }
-         } catch (_: Throwable) { }
+        val url = "https://dab.yeet.su/api/favorites"
+        try {
+            val bodyJson = converter.toDabTrackJson(track).toString()
+            val req1 = newRequestBuilder(url).post(bodyJson.toRequestBody("application/json".toMediaType())).build()
+            httpClient.newCall(req1).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    try { ioScope.launch { favoritesService.invalidateCache(); favoritesService.getFavoritesAuthenticated() } } catch (_: Throwable) { }
+                    return true
+                }
+            }
+        } catch (_: Throwable) { }
+        try {
+            val inner = converter.toDabTrackJson(track)
+            val wrapperJson = buildString { append('{'); append("\"track\":"); append(inner.toString()); append('}') }
+            val req2 = newRequestBuilder(url).post(wrapperJson.toRequestBody("application/json".toMediaType())).build()
+            httpClient.newCall(req2).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    try { ioScope.launch { favoritesService.invalidateCache(); favoritesService.getFavoritesAuthenticated() } } catch (_: Throwable) { }
+                }
+                return resp.isSuccessful
+            }
+        } catch (_: Throwable) { }
+        return false
+    }
 
-         try {
-             val inner = converter.toDabTrackJson(track)
-             val wrapperJson = buildString {
-                 append('{')
-                 append("\"track\":")
-                 append(inner.toString())
-                 append('}')
-             }
-             val req2 = newRequestBuilder(url).post(wrapperJson.toRequestBody("application/json".toMediaType())).build()
-             httpClient.newCall(req2).execute().use { resp ->
-                 if (resp.isSuccessful) {
-                     try { ioScope.launch { favoritesService.fetchFavoritesPage(1, 50) } } catch (_: Throwable) { }
-                 }
-                 return resp.isSuccessful
-             }
-         } catch (_: Throwable) { }
-         return false
-     }
-
+    /** Remove track from favorites */
     fun removeFavorite(trackId: String): Boolean {
-         return try {
-             val url = "https://dab.yeet.su/api/favorites?trackId=${URLEncoder.encode(trackId, "UTF-8")}"
-             val req = newRequestBuilder(url).delete().build()
-             httpClient.newCall(req).execute().use { resp ->
+        return try {
+            val url = "https://dab.yeet.su/api/favorites?trackId=${URLEncoder.encode(trackId, "UTF-8") }"
+            val req = newRequestBuilder(url).delete().build()
+            httpClient.newCall(req).execute().use { resp ->
                 val ok = resp.isSuccessful
                 if (ok) {
-                    try { ioScope.launch { favoritesService.fetchFavoritesPage(1, 50) } } catch (_: Throwable) {}
+                    try { ioScope.launch { favoritesService.invalidateCache(); favoritesService.getFavoritesAuthenticated() } } catch (_: Throwable) {}
                 }
                 ok
-             }
-         } catch (_: Throwable) { false }
-     }
+            }
+        } catch (_: Throwable) { false }
+    }
 
+    /** Check if track is in favorites */
     fun isTrackFavorite(trackId: String): Boolean {
         return try {
-            val list = fetchFavoritesPage(1, 500)
+            val list = getFavoritesAuthenticated()
             list.any { it.id == trackId || it.extras["dab_id"] == trackId }
         } catch (_: Throwable) { false }
     }
@@ -375,16 +369,18 @@ class DABApi(
     // Playlist delegates
     fun fetchLibraryPlaylistsPage(pageIndex: Int = 1, pageSize: Int = 50): List<Playlist> = playlistService.fetchLibraryPlaylistsPage(pageIndex, pageSize)
 
+    /** Get playlist tracks as paged data */
     fun getPlaylistTracks(playlist: Playlist, pageSize: Int = 1000): PagedData<Track> {
-         return PagedData.Single {
+        return PagedData.Single {
             try {
                 kotlinx.coroutines.runBlocking {
                     fetchAllPlaylistTracks(playlist, pageSize)
                 }
             } catch (_: Throwable) { emptyList() }
         }
-     }
+    }
 
+    /** Fetch all tracks for a playlist */
     suspend fun fetchAllPlaylistTracks(playlist: Playlist, pageSize: Int = 1000): List<Track> {
         return try {
             Log.d("DABApi", "fetchAllPlaylistTracks called for playlist=${playlist.id}, title='${playlist.title}'")
@@ -453,7 +449,7 @@ class DABApi(
                                 Log.d("DABApi", "Failed to parse as DabLibraryResponse from endpoint ${index + 1}: ${e.message}")
 
                                 // Try fallback parsing
-                                val fallbackTracks = parseTracksFromResponse(json.parseToJsonElement(body))
+                                val fallbackTracks = jsonParsingUtils.parseTracksFromResponse(json.parseToJsonElement(body))
                                 if (fallbackTracks.isNotEmpty()) {
                                     Log.i("DABApi", "SUCCESS: Parsed ${fallbackTracks.size} tracks using fallback parser from endpoint ${index + 1}")
                                     return@withContext fallbackTracks
@@ -474,78 +470,16 @@ class DABApi(
         }
     }
 
-    // Consolidated manual track parsing (removing redundancy across services)
+    /** Parse track from JSON object manually */
     private fun tryParseManualTrack(el: JsonObject): DabTrack? {
-        return try {
-            val idEl = el["id"] ?: el["trackId"] ?: el["track_id"] ?: el["track"] ?: return null
-            val idStr = (idEl as? JsonPrimitive)?.content ?: idEl.toString()
-            val idInt = idStr.toIntOrNull() ?: return null
-
-            val title = (el["title"] as? JsonPrimitive)?.content
-                ?: (el["name"] as? JsonPrimitive)?.content ?: ""
-            val artist = (el["artist"] as? JsonPrimitive)?.content
-                ?: (el["artistName"] as? JsonPrimitive)?.content ?: ""
-            val artistId = (el["artistId"] as? JsonPrimitive)?.content?.toIntOrNull()
-            val albumTitle = (el["albumTitle"] as? JsonPrimitive)?.content
-                ?: (el["album"] as? JsonPrimitive)?.content
-            val albumCover = (el["albumCover"] as? JsonPrimitive)?.content
-            val albumId = (el["albumId"] as? JsonPrimitive)?.content
-            val releaseDate = (el["releaseDate"] as? JsonPrimitive)?.content
-            val genre = (el["genre"] as? JsonPrimitive)?.content
-            val duration = (el["duration"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
-
-            DabTrack(
-                id = idInt,
-                title = title,
-                artist = artist,
-                artistId = artistId,
-                albumTitle = albumTitle,
-                albumCover = albumCover,
-                albumId = albumId,
-                releaseDate = releaseDate,
-                genre = genre,
-                duration = duration,
-                audioQuality = null
-            )
-        } catch (_: Throwable) { null }
+        val track = jsonParsingUtils.tryParseTrackFromJsonObject(el)
+        return if (track != null) {
+            // Convert back to DabTrack if needed - this indicates we need to refactor the converter
+            converter.toDabTrack(track)
+        } else null
     }
 
-    private fun parseTracksFromResponse(root: JsonElement): List<Track> {
-        val parsed = mutableListOf<Track>()
-
-        when (root) {
-            is JsonObject -> {
-                val candidates = listOf("tracks", "data", "items", "results", "favorites", "library", "content")
-                for (key in candidates) {
-                    val arr = root[key] as? JsonArray
-                    if (arr != null) {
-                        for (el in arr) if (el is JsonObject) try {
-                            val dt = json.decodeFromJsonElement(DabTrack.serializer(), el)
-                            parsed.add(converter.toTrack(dt))
-                        } catch (_: Throwable) {
-                            // Try enhanced manual parsing as fallback
-                            val track = tryParseManualTrack(el)
-                            if (track != null) parsed.add(converter.toTrack(track))
-                        }
-                        if (parsed.isNotEmpty()) break
-                    }
-                }
-            }
-            is JsonArray -> {
-                for (el in root) if (el is JsonObject) try {
-                    val dt = json.decodeFromJsonElement(DabTrack.serializer(), el)
-                    parsed.add(converter.toTrack(dt))
-                } catch (_: Throwable) {
-                    // Try enhanced manual parsing as fallback
-                    val track = tryParseManualTrack(el)
-                    if (track != null) parsed.add(converter.toTrack(track))
-                }
-            }
-            else -> { /* other types */ }
-        }
-        return parsed
-    }
-
+    /** Get artist details by ID */
     fun getArtistDetails(artistId: String): DabArtist? {
         return try {
             Log.d("DABApi", "Fetching artist details for artistId: $artistId")
@@ -624,6 +558,7 @@ class DABApi(
         }
     }
 
+    /** Parse artist data from JSON element */
     private fun parseArtistFromJsonElement(root: JsonElement): DabArtist? {
         return try {
             when (root) {
@@ -656,6 +591,7 @@ class DABApi(
         }
     }
 
+    /** Get artist's discography */
     fun getArtistDiscography(artistId: String): List<DabAlbum> {
         return try {
             Log.d("DABApi", "Fetching discography for artistId: $artistId")
@@ -717,6 +653,7 @@ class DABApi(
         }
     }
 
+    /** Parse discography from JSON element */
     private fun parseDiscographyFromJsonElement(root: JsonElement): List<DabAlbum> {
         val out = mutableListOf<DabAlbum>()
 
@@ -829,8 +766,9 @@ class DABApi(
                         if (!body.isNullOrEmpty()) {
                             try {
                                 val root = json.parseToJsonElement(body)
-                                val tracks = parseTracksFromResponse(root)
+                                val tracks = jsonParsingUtils.parseTracksFromResponse(root)
                                 debug.appendLine("  Parsed Tracks: ${tracks.size}")
+                                // Ensure tracks is a List<Track> so .title and .artists are valid
                                 if (tracks.isNotEmpty()) {
                                     debug.appendLine("  FOUND TRACKS - This endpoint works!")
                                     debug.appendLine("  Sample track: ${tracks.first().title} by ${tracks.first().artists.firstOrNull()?.name}")
@@ -852,7 +790,7 @@ class DABApi(
         return debug.toString()
     }
 
-    // Search functionality - consolidated and improved
+    /** Search all content types */
     suspend fun searchAll(query: String, limit: Int = 20): Triple<List<Track>, List<Album>, List<Artist>> {
         if (query.isBlank()) return Triple(emptyList<Track>(), emptyList<Album>(), emptyList<Artist>())
 
@@ -886,7 +824,7 @@ class DABApi(
         }
     }
 
-    // Try unified search endpoint that returns all types in one response
+    /** Try unified search API endpoint */
     private fun tryUnifiedSearch(query: String, limit: Int): Triple<List<Track>, List<Album>, List<Artist>>? {
         return try {
             val url = "https://dab.yeet.su/api/search?q=${URLEncoder.encode(query, "UTF-8")}&limit=$limit"
@@ -913,7 +851,7 @@ class DABApi(
         }
     }
 
-    // Generic search method that handles all types
+    /** Search by specific type */
     private suspend fun searchByType(query: String, type: String, limit: Int): List<Any> {
         if (query.isBlank()) return emptyList()
 
@@ -965,7 +903,7 @@ class DABApi(
         }
     }
 
-    // Extract unique artists from track search results
+    /** Extract artists from track search results */
     private fun extractArtistsFromResponse(body: String): List<Artist> {
         try {
             val root = json.parseToJsonElement(body) as? JsonObject ?: return emptyList()
@@ -1011,7 +949,7 @@ class DABApi(
         }
     }
 
-    // Consolidated search response parsing
+    /** Parse search response with specific parser */
     private fun parseSearchResponse(body: String, parser: (JsonObject) -> Any?): List<Any> {
         Log.d("DABApi", "Parsing search response with parser")
 
@@ -1128,7 +1066,7 @@ class DABApi(
         return emptyList()
     }
 
-    // Parse unified search response containing multiple types
+    /** Parse unified search response */
     private fun parseUnifiedSearchResponse(body: String): Triple<List<Track>, List<Album>, List<Artist>>? {
         try {
             val root = json.parseToJsonElement(body) as? JsonObject ?: return null
@@ -1194,7 +1132,7 @@ class DABApi(
         }
     }
 
-    // Generic search response parser for arrays/objects
+    /** Generic search response parser for arrays/objects */
     private fun parseGenericSearchResponse(root: JsonElement, parser: (JsonObject) -> Any?): List<Any> {
         val results = mutableListOf<Any>()
 
@@ -1221,16 +1159,14 @@ class DABApi(
                     }
                 }
             }
-            else -> { /* Unsupported type */ }
+            else -> { }
         }
 
         return results
     }
 
-    // Specific result parsers with enhanced fallback logic
+    /** Parse track from search result */
     private fun parseTrackResult(el: JsonObject): Track? {
-        Log.d("DABApi", "Parsing track result from JsonObject with keys: ${el.keys}")
-
         return try {
             // Try direct DabTrack parsing first
             val dabTrack = json.decodeFromJsonElement(DabTrack.serializer(), el)
@@ -1286,9 +1222,8 @@ class DABApi(
         }
     }
 
+    /** Parse album from search result */
     private fun parseAlbumResult(el: JsonObject): Album? {
-        Log.d("DABApi", "Parsing album result from JsonObject with keys: ${el.keys}")
-
         return try {
             // Try direct DabAlbum parsing first
             val dabAlbum = json.decodeFromJsonElement(DabAlbum.serializer(), el)
@@ -1335,9 +1270,8 @@ class DABApi(
         }
     }
 
+    /** Parse artist from search result */
     private fun parseArtistResult(el: JsonObject): Artist? {
-        Log.d("DABApi", "Parsing artist result from JsonObject with keys: ${el.keys}")
-
         return try {
             // Try direct DabArtist parsing first
             val dabArtist = json.decodeFromJsonElement(DabArtist.serializer(), el)
@@ -1360,8 +1294,6 @@ class DABApi(
                     ?: (el["cover"] as? JsonPrimitive)?.content
                     ?: (el["image"] as? JsonPrimitive)?.content
 
-                Log.d("DABApi", "Manual artist parsing - ID: $idInt, Name: '$name'")
-
                 val dabArtist = DabArtist(
                     id = idInt,
                     name = name,
@@ -1378,7 +1310,7 @@ class DABApi(
         }
     }
 
-    // Convenience methods that delegate to the unified search implementation
+    // Search convenience methods
     suspend fun searchTracks(query: String, limit: Int = 20): List<Track> {
         return searchByType(query, "track", limit).filterIsInstance<Track>()
     }
