@@ -25,14 +25,40 @@ class PlaylistService(
     private val converter: Converter,
     private val settings: Settings
 ) {
+    companion object {
+        private const val LIBRARIES_BASE = "https://dab.yeet.su/api/libraries"
+        private const val PLAYLISTS_BASE = "https://dab.yeet.su/api/playlists"
+        private const val LIBRARY_FALLBACK = "https://dab.yeet.su/api/library"
+        private val PLAYLIST_LIST_ENDPOINTS = listOf(LIBRARIES_BASE, PLAYLISTS_BASE, LIBRARY_FALLBACK)
+        private const val TRACKS_SEGMENT = "/tracks"
+        private const val CACHE_TTL_MS = 120_000L
+        private const val PLAYLISTS_CACHE_TTL_MS = 60_000L
+    }
+
     // Use consolidated utilities
     private val requestUtils: RequestUtils by lazy { RequestUtils(settings) }
     private val jsonParsingUtils: JsonParsingUtils by lazy { JsonParsingUtils(json, converter) }
 
     private val playlistCache = mutableMapOf<String, Pair<Long, List<Track>>>()
-    private val CACHE_TTL_MS = 2 * 60 * 1000L
     private var playlistsCache: Pair<Long, List<Playlist>>? = null
-    private val PLAYLISTS_CACHE_TTL_MS = 60 * 1000L
+
+    private fun enc(v: String) = URLEncoder.encode(v, "UTF-8")
+
+    private fun within(ts: Long, ttl: Long) = (System.currentTimeMillis() - ts) <= ttl
+
+    private fun newRequest(url: String) = requestUtils.newRequestBuilder(url).build()
+
+    private inline fun <R> execute(url: String, onFail: () -> R, block: (String) -> R): R {
+        return try {
+            httpClient.newCall(newRequest(url)).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    requestUtils.clearSessionOnAuthFailure(resp.code); return onFail()
+                }
+                val body = resp.body?.string() ?: return onFail()
+                block(body)
+            }
+        } catch (_: Throwable) { onFail() }
+    }
 
     /** Get cached tracks for playlist if valid */
     fun getCachedTracksForPlaylist(playlistId: String): List<Track>? {
@@ -49,49 +75,16 @@ class PlaylistService(
     suspend fun fetchTracksForPlaylistSync(playlist: Playlist, pageIndex: Int = 1, pageSize: Int = 1000): List<Track> {
         return withContext(Dispatchers.IO) {
             if (!requestUtils.isLoggedIn()) {
-                playlistCache.clear()
-                return@withContext emptyList()
+                playlistCache.clear(); return@withContext emptyList()
             }
+            val cached = playlistCache[playlist.id]
+            if (cached != null && within(cached.first, CACHE_TTL_MS)) return@withContext cached.second
 
+            val url = "$LIBRARIES_BASE/${enc(playlist.id)}?page=$pageIndex&limit=$pageSize"
             val now = System.currentTimeMillis()
-            val cacheEntry = playlistCache[playlist.id]
-            if (cacheEntry != null && now - cacheEntry.first <= CACHE_TTL_MS) {
-                return@withContext cacheEntry.second
-            }
-
-            val correctEndpoint = "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}".trim()
-            val requestUrl = "$correctEndpoint?page=$pageIndex&limit=$pageSize"
-
-            val clientRobust = httpClient.newBuilder().callTimeout(10000, TimeUnit.MILLISECONDS).build()
-
-            try {
-                val req = requestUtils.newRequestBuilder(requestUrl).build()
-                clientRobust.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        requestUtils.clearSessionOnAuthFailure(resp.code)
-                        if (resp.code == 401 || resp.code == 403) {
-                            playlistCache.clear()
-                            playlistsCache = null
-                        }
-                        return@withContext emptyList()
-                    }
-
-                    val body = resp.body?.string()
-                    if (body.isNullOrEmpty()) {
-                        return@withContext emptyList()
-                    }
-
-                    val tracks = parseLibraryResponse(body)
-
-                    if (tracks.isNotEmpty()) {
-                        playlistCache[playlist.id] = now to tracks
-                        return@withContext tracks
-                    }
-                }
-            } catch (_: Throwable) { }
-
-            playlistCache[playlist.id] = now to emptyList()
-            emptyList()
+            val tracks = execute(url, { emptyList() }) { parseLibraryResponse(it) }
+            playlistCache[playlist.id] = now to tracks
+            tracks
         }
     }
 
@@ -117,47 +110,19 @@ class PlaylistService(
 
     /** Fetch library playlists with pagination */
     fun fetchLibraryPlaylistsPage(pageIndex: Int = 1, pageSize: Int = 50, includeCovers: Boolean = true): List<Playlist> {
-        if (!requestUtils.isLoggedIn()) {
-            playlistsCache = null
-            return emptyList()
+        if (!requestUtils.isLoggedIn()) { playlistsCache = null; return emptyList() }
+        playlistsCache?.let { (ts, list) -> if (within(ts, PLAYLISTS_CACHE_TTL_MS)) return list }
+
+        val querySuffix = "?page=$pageIndex&limit=$pageSize"
+        var result: List<Playlist> = emptyList()
+        for (base in PLAYLIST_LIST_ENDPOINTS) {
+            val url = base + querySuffix
+            result = execute(url, { emptyList() }) { parsePlaylistsFromBody(it) }
+            if (result.isNotEmpty()) break
         }
-
-        val now = System.currentTimeMillis()
-        val cached = playlistsCache
-        if (cached != null && now - cached.first <= PLAYLISTS_CACHE_TTL_MS) return cached.second
-
-        val candidates = listOf(
-            "https://dab.yeet.su/api/libraries?page=$pageIndex&limit=$pageSize",
-            "https://dab.yeet.su/api/playlists?page=$pageIndex&limit=$pageSize",
-            "https://dab.yeet.su/api/library?page=$pageIndex&limit=$pageSize"
-        )
-
-        for (url in candidates) {
-            try {
-                val req = requestUtils.newRequestBuilder(url).build()
-                httpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        requestUtils.clearSessionOnAuthFailure(resp.code)
-                        if (resp.code == 401 || resp.code == 403) {
-                            playlistsCache = null
-                            playlistCache.clear()
-                        }
-                        continue
-                    }
-                    val body = resp.body?.string() ?: continue
-
-                    val playlists = parsePlaylistsFromBody(body)
-                    if (playlists.isNotEmpty()) {
-                        if (includeCovers) augmentPlaylistsWithCovers(playlists.toMutableList())
-                        playlistsCache = now to playlists
-                        return playlists
-                    }
-                }
-            } catch (_: Throwable) { }
-        }
-
-        playlistsCache = now to emptyList()
-        return emptyList()
+        if (result.isNotEmpty() && includeCovers) augmentPlaylistsWithCovers(result.toMutableList())
+        playlistsCache = System.currentTimeMillis() to result
+        return result
     }
 
     /** Parse playlists from response body */
@@ -234,80 +199,63 @@ class PlaylistService(
     // Create a new playlist (library)
     fun createPlaylist(title: String, description: String?): Playlist {
         val bodyJson = buildString {
-            append('{')
-            append("\"name\":\"").append(title.replace("\"", "\\\"")).append('"')
-            if (!description.isNullOrBlank()) {
-                append(',')
-                append("\"description\":\"").append(description.replace("\"", "\\\"")).append('"')
-            }
+            append('{'); append("\"name\":\"").append(title.replace("\"", "\\\"")).append('"')
+            if (!description.isNullOrBlank()) append(",\"description\":\"").append(description.replace("\"", "\\\"")).append('"')
             append('}')
         }
-        val req = requestUtils.newRequestBuilder("https://dab.yeet.su/api/libraries")
-            .post(bodyJson.toRequestBody("application/json".toMediaType())).build()
-        httpClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                requestUtils.clearSessionOnAuthFailure(resp.code)
-                error("Failed to create playlist: ${resp.code}")
+        val url = LIBRARIES_BASE
+        return try {
+            httpClient.newCall(
+                requestUtils.newRequestBuilder(url)
+                    .post(bodyJson.toRequestBody("application/json".toMediaType()))
+                    .build()
+            ).execute().use { resp ->
+                if (!resp.isSuccessful) { requestUtils.clearSessionOnAuthFailure(resp.code); error("Failed to create playlist: ${resp.code}") }
+                val body = resp.body?.string() ?: error("Empty create playlist response")
+                val playlist = parseSinglePlaylist(body) ?: error("Failed to parse created playlist")
+                invalidateCaches(); playlist
             }
-            val body = resp.body?.string() ?: error("Empty create playlist response")
-            val playlist = parseSinglePlaylist(body) ?: error("Failed to parse created playlist")
-            invalidateCaches()
-            return playlist
-        }
+        } catch (e: Throwable) { error("Failed to create playlist: ${e.message}") }
     }
 
-    // Delete a playlist
+    // Simplify: use direct request (execute helper above tailored for GET; keep original logic for writes)
     fun deletePlaylist(playlist: Playlist) {
-        val req = requestUtils.newRequestBuilder("https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}")
-            .delete().build()
-        httpClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                requestUtils.clearSessionOnAuthFailure(resp.code)
-                error("Failed to delete playlist: ${resp.code}")
+        val url = "$LIBRARIES_BASE/${enc(playlist.id)}"
+        try {
+            httpClient.newCall(requestUtils.newRequestBuilder(url).delete().build()).execute().use { resp ->
+                if (!resp.isSuccessful) { requestUtils.clearSessionOnAuthFailure(resp.code); error("Failed to delete playlist: ${resp.code}") }
+                invalidateCaches()
             }
-            invalidateCaches()
-        }
+        } catch (e: Throwable) { error("Failed to delete playlist: ${e.message}") }
     }
 
     // Edit playlist metadata
     fun editPlaylistMetadata(playlist: Playlist, title: String, description: String?) : Playlist {
         val bodyJson = buildString {
-            append('{')
-            append("\"name\":\"").append(title.replace("\"", "\\\"")).append('"')
-            if (description != null) {
-                append(',')
-                append("\"description\":")
-                if (description.isBlank()) append("null") else append("\"").append(description.replace("\"", "\\\"")).append('"')
-            }
+            append('{'); append("\"name\":\"").append(title.replace("\"", "\\\"")).append('\"')
+            append(','); append("\"description\":"); if (description == null) append("null") else append("\"").append(description.replace("\"", "\\\"")).append("\"")
             append('}')
         }
-        val req = requestUtils.newRequestBuilder("https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}")
-            .patch(bodyJson.toRequestBody("application/json".toMediaType())).build()
-        httpClient.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) {
-                requestUtils.clearSessionOnAuthFailure(resp.code)
-                error("Failed to edit playlist: ${resp.code}")
+        val url = "$LIBRARIES_BASE/${enc(playlist.id)}"
+        return try {
+            httpClient.newCall(requestUtils.newRequestBuilder(url).patch(bodyJson.toRequestBody("application/json".toMediaType())).build()).execute().use { resp ->
+                if (!resp.isSuccessful) { requestUtils.clearSessionOnAuthFailure(resp.code); error("Failed to edit playlist: ${resp.code}") }
+                val body = resp.body?.string(); val updated = body?.let { parseSinglePlaylist(it) }
+                invalidateCaches(); updated ?: playlist.copy(title = title)
             }
-            val body = resp.body?.string() ?: return playlist
-            val updated = parseSinglePlaylist(body) ?: playlist.copy(title = title)
-            invalidateCaches()
-            return updated
-        }
+        } catch (_: Throwable) { playlist.copy(title = title) }
     }
 
     // Add tracks to playlist (sequentially)
     fun addTracks(playlist: Playlist, new: List<Track>) {
         if (new.isEmpty()) return
-        for (t in new) {
+        val url = "$LIBRARIES_BASE/${enc(playlist.id)}$TRACKS_SEGMENT"
+        new.forEach { t ->
             try {
                 val inner = converter.toDabTrackJson(t).toString()
                 val wrapper = "{\"track\":$inner}"
-                val req = requestUtils.newRequestBuilder("https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks")
-                    .post(wrapper.toRequestBody("application/json".toMediaType())).build()
-                httpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        requestUtils.clearSessionOnAuthFailure(resp.code)
-                    }
+                httpClient.newCall(requestUtils.newRequestBuilder(url).post(wrapper.toRequestBody("application/json".toMediaType())).build()).execute().use { resp ->
+                    if (!resp.isSuccessful) requestUtils.clearSessionOnAuthFailure(resp.code)
                 }
             } catch (_: Throwable) { }
         }
@@ -318,14 +266,11 @@ class PlaylistService(
     fun removeTracks(playlist: Playlist, tracks: List<Track>, indexes: List<Int>) {
         if (indexes.isEmpty()) return
         val uniqueIds = indexes.mapNotNull { tracks.getOrNull(it)?.id }.distinct()
-        for (id in uniqueIds) {
+        uniqueIds.forEach { id ->
+            val url = "$LIBRARIES_BASE/${enc(playlist.id)}$TRACKS_SEGMENT/${enc(id)}"
             try {
-                val url = "https://dab.yeet.su/api/libraries/${URLEncoder.encode(playlist.id, "UTF-8")}/tracks/${URLEncoder.encode(id, "UTF-8") }"
-                val req = requestUtils.newRequestBuilder(url).delete().build()
-                httpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        requestUtils.clearSessionOnAuthFailure(resp.code)
-                    }
+                httpClient.newCall(requestUtils.newRequestBuilder(url).delete().build()).execute().use { resp ->
+                    if (!resp.isSuccessful) requestUtils.clearSessionOnAuthFailure(resp.code)
                 }
             } catch (_: Throwable) { }
         }

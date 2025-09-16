@@ -19,6 +19,17 @@ import java.net.URLEncoder
 class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient, PlaylistClient,
     TrackClient, SearchFeedClient, AlbumClient, ArtistClient, LyricsClient, LikeClient, PlaylistEditClient {
 
+    companion object {
+        private const val PREVIEW_LIMIT = 20
+        private const val FULL_LIMIT = 200
+        private const val PLAYLIST_TRACK_AGGREGATE_LIMIT = 5000
+        private val STANDARD_LAYOUT_EXTRAS = mapOf(
+            "preferred_layout" to "grid_if_wide",
+            "preferred_padding" to "16",
+            "preferred_item_spacing" to "8"
+        )
+    }
+
     private lateinit var settings: Settings
     private val client by lazy {
         OkHttpClient.Builder()
@@ -197,243 +208,310 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         }
     }
 
-    /** Load search feed with tabs for different content types */
-    override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
-        if (query.isBlank()) {
-            return emptyList<Shelf>().toFeed()
-        }
-        return Feed(searchTabs) { tab ->
-            when (tab?.id) {
-                "all" -> {
-                    val pagedAll: PagedData<Shelf> = PagedData.Single {
-                        try {
-                            val (tracks, albums, artists) = withContext(Dispatchers.IO) {
-                                api.searchAll(query, 20)
-                            }
-
-                            val shelves = mutableListOf<Shelf>()
-
-                            if (tracks.isNotEmpty()) {
-                                shelves.add(
-                                    Shelf.Lists.Items(
-                                        id = "search_all_tracks",
-                                        title = "Tracks",
-                                        list = tracks.take(20),
-                                        type = Shelf.Lists.Type.Linear
-                                    )
-                                )
-                            }
-
-                            if (albums.isNotEmpty()) {
-                                shelves.add(
-                                    Shelf.Lists.Items(
-                                        id = "search_all_albums",
-                                        title = "Albums",
-                                        list = albums.take(20),
-                                        type = Shelf.Lists.Type.Linear
-                                    )
-                                )
-                            }
-
-                            if (artists.isNotEmpty()) {
-                                shelves.add(
-                                    Shelf.Lists.Items(
-                                        id = "search_all_artists",
-                                        title = "Artists",
-                                        list = artists.take(20),
-                                        type = Shelf.Lists.Type.Linear
-                                    )
-                                )
-                            }
-
-                            // Fallback searches if unified search didn't return albums/artists
-                            if (albums.isEmpty() || artists.isEmpty()) {
-                                val fallbackAlbums = if (albums.isEmpty()) withContext(Dispatchers.IO) {
-                                    api.searchAlbums(query, 10)
-                                } else emptyList()
-                                val fallbackArtists = if (artists.isEmpty()) withContext(Dispatchers.IO) {
-                                    api.searchArtists(query, 10)
-                                } else emptyList()
-                                if (fallbackAlbums.isNotEmpty()) {
-                                    shelves.add(
-                                        Shelf.Lists.Items(
-                                            id = "search_all_albums_fallback",
-                                            title = "Albums",
-                                            list = fallbackAlbums,
-                                            type = Shelf.Lists.Type.Linear
-                                        )
-                                    )
-                                }
-                                if (fallbackArtists.isNotEmpty()) {
-                                    shelves.add(
-                                        Shelf.Lists.Items(
-                                            id = "search_all_artists_fallback",
-                                            title = "Artists",
-                                            list = fallbackArtists,
-                                            type = Shelf.Lists.Type.Linear
-                                        )
-                                    )
-                                }
-                            }
-
-                            shelves
-                        } catch (_: Throwable) {
-                            emptyList()
-                        }
-                    }
-                    Feed.Data(pagedAll)
-                }
-
-                "tracks" -> {
-                    val rawTracks = try { withContext(Dispatchers.IO) { api.searchTracks(query, 50) } } catch (_: Throwable) { emptyList<Track>() }
-                    if (rawTracks.isEmpty()) {
-                        Feed.Data(PagedData.empty())
-                    } else {
-                        val layoutExtras = mapOf(
-                            "preferred_layout" to "grid_if_wide",
-                            "preferred_padding" to "16",
-                            "preferred_item_spacing" to "8"
-                        )
-                        val modified = rawTracks.map { it.copy(extras = it.extras + layoutExtras) }
-                        val pagedTracks: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
-                        Feed.Data(
-                            pagedData = pagedTracks,
-                            background = null
-                        )
-                    }
-                }
-
-                "albums" -> {
-                    // Present each album as individual shelf items with layout extras similar to tracks
-                    val rawAlbums = try { withContext(Dispatchers.IO) { api.searchAlbums(query, 50) } } catch (_: Throwable) { emptyList<Album>() }
-                    if (rawAlbums.isEmpty()) {
-                        Feed.Data(PagedData.empty())
-                    } else {
-                        val layoutExtras = mapOf(
-                            "preferred_layout" to "grid_if_wide",
-                            "preferred_padding" to "16",
-                            "preferred_item_spacing" to "8"
-                        )
-                        val modified = rawAlbums.map { it.copy(extras = it.extras + layoutExtras) }
-                        val pagedAlbums: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
-                        Feed.Data(
-                            pagedData = pagedAlbums,
-                            buttons = Feed.Buttons(
-                                showSearch = true,
-                                showSort = true,
-                                showPlayAndShuffle = false,
-                                customTrackList = null
-                            ),
-                            background = null
-                        )
-                    }
-                }
-
-                "artists" -> {
-                    val pagedArtists: PagedData<Shelf> = PagedData.Single {
-                        try {
-                            val artists = withContext(Dispatchers.IO) {
-                                api.searchArtists(query, 50)
-                            }
-
-                            if (artists.isEmpty()) {
-                                emptyList()
-                            } else {
-                                listOf(
-                                    Shelf.Lists.Items(
-                                        id = "search_artists",
-                                        title = "Results",
-                                        list = artists,
-                                        type = Shelf.Lists.Type.Grid
-                                    )
-                                )
-                            }
-                        } catch (_: Throwable) {
-                            emptyList()
-                        }
-                    }
-                    Feed.Data(pagedArtists)
-                }
-
-                else -> emptyList<Shelf>().toFeedData()
-            }
-        }
-    }
-
     // --- AlbumClient ---
-    /** Load complete album details including tracks */
     override suspend fun loadAlbum(album: Album): Album {
-        val dabAlbum = withContext(Dispatchers.IO) {
-            api.getAlbum(album.id)
-        }
-
-        val result = dabAlbum?.let { converter.toAlbum(it) } ?: album
-        return result
+        val dab = withContext(Dispatchers.IO) { api.getAlbum(album.id) }
+        return dab?.let { converter.toAlbum(it) } ?: album
     }
 
-    /** Load all tracks for an album */
     override suspend fun loadTracks(album: Album): Feed<Track>? {
-        val dabAlbum = withContext(Dispatchers.IO) {
-            api.getAlbum(album.id)
-        }
-
-        val tracks = dabAlbum?.tracks?.map { converter.toTrack(it) }
-        if (tracks.isNullOrEmpty()) {
-            return null
-        }
+        val dab = withContext(Dispatchers.IO) { api.getAlbum(album.id) }
+        val tracks = dab?.tracks?.map { converter.toTrack(it) } ?: return null
         return tracks.toFeed()
     }
 
-    /** Load album feed with tracks shelf */
     override suspend fun loadFeed(album: Album): Feed<Shelf>? {
-        val dabAlbum = withContext(Dispatchers.IO) {
-            api.getAlbum(album.id)
-        }
-
-        val tracks = dabAlbum?.tracks?.map { converter.toTrack(it) }
-        if (tracks.isNullOrEmpty()) {
-            return null
-        }
-        val shelves = listOf(
+        val dab = withContext(Dispatchers.IO) { api.getAlbum(album.id) }
+        val tracks = dab?.tracks?.map { converter.toTrack(it) } ?: return null
+        return listOf(
             Shelf.Lists.Tracks(
                 id = "album_tracks_${album.id}",
                 title = "Tracks",
                 list = tracks
             )
-        )
-        return shelves.toFeed()
+        ).toFeed()
     }
 
     // --- ArtistClient ---
-    /** Load artist details */
     override suspend fun loadArtist(artist: Artist): Artist {
-        val dabArtist = withContext(Dispatchers.IO) {
-            api.getArtistDetails(artist.id)
-        }
-
-        val result = dabArtist?.let { converter.toArtist(it) } ?: artist
-        return result
+        val dab = withContext(Dispatchers.IO) { api.getArtistDetails(artist.id) }
+        return dab?.let { converter.toArtist(it) } ?: artist
     }
 
-    /** Load artist feed with discography */
     override suspend fun loadFeed(artist: Artist): Feed<Shelf> {
-        val albums = withContext(Dispatchers.IO) {
-            api.getArtistDiscography(artist.id)
-        }
-
-        if (albums.isEmpty()) {
-            return emptyList<Shelf>().toFeed()
-        }
-        val albumItems = albums.map { converter.toAlbum(it) }
-        val shelves = listOf(
+        val albums = withContext(Dispatchers.IO) { api.getArtistDiscography(artist.id) }
+        if (albums.isEmpty()) return emptyList<Shelf>().toFeed()
+        val converted = albums.map { converter.toAlbum(it) }
+        return listOf(
             Shelf.Lists.Items(
                 id = "artist_albums_${artist.id}",
                 title = "Albums",
-                list = albumItems,
+                list = converted,
                 type = Shelf.Lists.Type.Grid
             )
+        ).toFeed()
+    }
+
+    // Region: Common Helpers -------------------------------------------------
+
+    private fun applyTrackLayoutExtras(tracks: List<Track>) =
+        tracks.map { it.copy(extras = it.extras + STANDARD_LAYOUT_EXTRAS) }
+
+    private fun applyAlbumLayoutExtras(albums: List<Album>) =
+        albums.map { it.copy(extras = it.extras + STANDARD_LAYOUT_EXTRAS) }
+
+    private fun applyArtistLayoutExtras(artists: List<Artist>) =
+        artists.map { it.copy(extras = it.extras + STANDARD_LAYOUT_EXTRAS) }
+
+    private fun buildPagedShelf(vararg shelves: Shelf): PagedData<Shelf> =
+        PagedData.Single { shelves.toList() }
+
+    private fun buildTrackMoreFeed(all: List<Track>): Feed<Shelf> = Feed(listOf()) {
+        val modified = applyTrackLayoutExtras(all)
+        val paged: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
+        Feed.Data(
+            pagedData = paged,
+            buttons = Feed.Buttons(
+                showSearch = true,
+                showSort = true,
+                showPlayAndShuffle = true,
+                customTrackList = modified
+            )
         )
-        return shelves.toFeed()
+    }
+
+    private fun buildAlbumMoreFeed(all: List<Album>): Feed<Shelf> = Feed(listOf()) {
+        val modified = applyAlbumLayoutExtras(all)
+        val paged: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
+        Feed.Data(
+            pagedData = paged,
+            buttons = Feed.Buttons(
+                showSearch = true,
+                showSort = true,
+                showPlayAndShuffle = false
+            )
+        )
+    }
+
+    private fun buildArtistMoreFeed(all: List<Artist>): Feed<Shelf> = Feed(listOf()) {
+        val modified = applyArtistLayoutExtras(all)
+        val paged: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
+        Feed.Data(
+            pagedData = paged,
+            buttons = Feed.Buttons(
+                showSearch = true,
+                showSort = true,
+                showPlayAndShuffle = false
+            )
+        )
+    }
+
+    private fun buildPlaylistMoreFeed(allPlaylists: List<Playlist>, aggregatedTracks: List<Track>): Feed<Shelf> = Feed(listOf()) {
+        val paged: PagedData<Shelf> = buildPagedShelf(
+            Shelf.Lists.Items(
+                id = "library_playlists_all_full",
+                title = "Playlists",
+                list = allPlaylists,
+                type = Shelf.Lists.Type.Linear
+            )
+        )
+        Feed.Data(
+            pagedData = paged,
+            buttons = Feed.Buttons(
+                showSearch = true,
+                showSort = true,
+                showPlayAndShuffle = aggregatedTracks.isNotEmpty(),
+                customTrackList = aggregatedTracks.ifEmpty { null }
+            )
+        )
+    }
+
+    private fun buildFavoritesMoreFeed(allTracks: List<Track>): Feed<Shelf> = buildTrackMoreFeed(allTracks)
+
+    private fun moreFeedIfNeeded(count: Int, builder: () -> Feed<Shelf>): Feed<Shelf>? =
+        if (count >= PREVIEW_LIMIT) builder() else null
+
+    // Region: Search Feed ----------------------------------------------------
+    /** Load search feed with tabs for different content types */
+    override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
+        if (query.isBlank()) return emptyList<Shelf>().toFeed()
+        return Feed(searchTabs) { tab ->
+            when (tab?.id) {
+                "all" -> {
+                    val pagedAll: PagedData<Shelf> = PagedData.Single {
+                        try {
+                            var (tracksFull, albumsFull, artistsFull) = withContext(Dispatchers.IO) { api.searchAll(query, FULL_LIMIT) }
+                            if (albumsFull.isEmpty()) albumsFull = try { withContext(Dispatchers.IO) { api.searchAlbums(query, FULL_LIMIT) } } catch (_: Throwable) { emptyList() }
+                            if (artistsFull.isEmpty()) artistsFull = try { withContext(Dispatchers.IO) { api.searchArtists(query, FULL_LIMIT) } } catch (_: Throwable) { emptyList() }
+
+                            val shelves = mutableListOf<Shelf>()
+                            if (tracksFull.isNotEmpty()) {
+                                shelves.add(
+                                    Shelf.Lists.Items(
+                                        id = "search_all_tracks",
+                                        title = "Tracks",
+                                        list = tracksFull.take(PREVIEW_LIMIT),
+                                        type = Shelf.Lists.Type.Linear,
+                                        more = moreFeedIfNeeded(tracksFull.size) { buildTrackMoreFeed(tracksFull) }
+                                    )
+                                )
+                            }
+                            if (albumsFull.isNotEmpty()) {
+                                shelves.add(
+                                    Shelf.Lists.Items(
+                                        id = "search_all_albums",
+                                        title = "Albums",
+                                        list = albumsFull.take(PREVIEW_LIMIT),
+                                        type = Shelf.Lists.Type.Linear,
+                                        more = moreFeedIfNeeded(albumsFull.size) { buildAlbumMoreFeed(albumsFull) }
+                                    )
+                                )
+                            }
+                            if (artistsFull.isNotEmpty()) {
+                                shelves.add(
+                                    Shelf.Lists.Items(
+                                        id = "search_all_artists",
+                                        title = "Artists",
+                                        list = artistsFull.take(PREVIEW_LIMIT),
+                                        type = Shelf.Lists.Type.Linear,
+                                        more = moreFeedIfNeeded(artistsFull.size) { buildArtistMoreFeed(artistsFull) }
+                                    )
+                                )
+                            }
+                            shelves
+                        } catch (_: Throwable) { emptyList() }
+                    }
+                    Feed.Data(pagedAll)
+                }
+                "tracks" -> {
+                    val fullTracks = try { withContext(Dispatchers.IO) { api.searchTracks(query, FULL_LIMIT) } } catch (_: Throwable) { emptyList() }
+                    if (fullTracks.isEmpty()) Feed.Data(PagedData.empty()) else {
+                        val modifiedFull = applyTrackLayoutExtras(fullTracks)
+                        val moreFeed = moreFeedIfNeeded(modifiedFull.size) { buildTrackMoreFeed(modifiedFull) }
+                        val previewShelf = Shelf.Lists.Items(
+                            id = "search_tracks_preview",
+                            title = "Results",
+                            list = modifiedFull.take(PREVIEW_LIMIT),
+                            type = Shelf.Lists.Type.Linear,
+                            more = moreFeed
+                        )
+                        Feed.Data(buildPagedShelf(previewShelf))
+                    }
+                }
+                "albums" -> {
+                    val fullAlbums = try { withContext(Dispatchers.IO) { api.searchAlbums(query, FULL_LIMIT) } } catch (_: Throwable) { emptyList() }
+                    if (fullAlbums.isEmpty()) Feed.Data(PagedData.empty()) else {
+                        val modifiedFull = applyAlbumLayoutExtras(fullAlbums)
+                        val moreFeed = moreFeedIfNeeded(modifiedFull.size) { buildAlbumMoreFeed(modifiedFull) }
+                        val previewShelf = Shelf.Lists.Items(
+                            id = "search_albums_preview",
+                            title = "Albums",
+                            list = modifiedFull.take(PREVIEW_LIMIT),
+                            type = Shelf.Lists.Type.Linear,
+                            more = moreFeed
+                        )
+                        Feed.Data(buildPagedShelf(previewShelf))
+                    }
+                }
+                "artists" -> {
+                    val fullArtists = try { withContext(Dispatchers.IO) { api.searchArtists(query, FULL_LIMIT) } } catch (_: Throwable) { emptyList() }
+                    if (fullArtists.isEmpty()) Feed.Data(PagedData.empty()) else {
+                        val modifiedFull = applyArtistLayoutExtras(fullArtists)
+                        val moreFeed = moreFeedIfNeeded(modifiedFull.size) { buildArtistMoreFeed(modifiedFull) }
+                        val previewShelf = Shelf.Lists.Items(
+                            id = "search_artists_preview",
+                            title = "Artists",
+                            list = modifiedFull.take(PREVIEW_LIMIT),
+                            type = Shelf.Lists.Type.Grid,
+                            more = moreFeed
+                        )
+                        Feed.Data(buildPagedShelf(previewShelf))
+                    }
+                }
+                else -> emptyList<Shelf>().toFeedData()
+            }
+        }
+    }
+
+    // Region: Library Feed ---------------------------------------------------
+    /** Load user's library feed with tabs for different content types */
+    override suspend fun loadLibraryFeed(): Feed<Shelf> {
+        getCurrentUser() ?: throw ClientException.LoginRequired()
+        val genAtStart = sessionGeneration
+        return Feed(libraryTabs) { tab ->
+            if (genAtStart != sessionGeneration) if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
+            if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
+            when (tab?.id) {
+                "all" -> {
+                    val playlists = try { loadPlaylists(genAtStart) } catch (e: ClientException.LoginRequired) { throw e } catch (_: Throwable) { null }
+                    val favorites = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList() }
+                    if (genAtStart != sessionGeneration) if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
+                    val shelves = buildList {
+                        playlists?.takeIf { it.isNotEmpty() }?.let { pls ->
+                            val moreFeed = moreFeedIfNeeded(pls.size) {
+                                // Defer expensive aggregation; placeholder empty list for play/shuffle
+                                buildPlaylistMoreFeed(pls, emptyList())
+                            }
+                            add(
+                                Shelf.Lists.Items(
+                                    id = "library_playlists_all",
+                                    title = "Playlists",
+                                    list = pls.take(PREVIEW_LIMIT),
+                                    type = Shelf.Lists.Type.Linear,
+                                    more = moreFeed
+                                )
+                            )
+                        }
+                        if (favorites.isNotEmpty()) {
+                            val moreFeed = moreFeedIfNeeded(favorites.size) { buildFavoritesMoreFeed(favorites) }
+                            add(
+                                Shelf.Lists.Tracks(
+                                    id = "favorites_tracks_all",
+                                    title = "Favorites",
+                                    list = favorites.take(PREVIEW_LIMIT),
+                                    type = Shelf.Lists.Type.Linear,
+                                    more = moreFeed
+                                )
+                            )
+                        }
+                    }
+                    shelvesToFeedData(shelves)
+                }
+                "playlists" -> {
+                    val playlists = try { loadPlaylists(genAtStart) } catch (e: ClientException.LoginRequired) { throw e } catch (_: Throwable) { null }
+                    if (genAtStart != sessionGeneration) if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
+                    val shelfList = playlists?.takeIf { it.isNotEmpty() }?.let {
+                        listOf(
+                            Shelf.Lists.Items(
+                                id = "library_playlists_tab",
+                                title = "Playlists",
+                                list = it,
+                                type = Shelf.Lists.Type.Linear
+                            )
+                        )
+                    } ?: emptyList()
+                    shelvesToFeedData(shelfList)
+                }
+                "tracks" -> {
+                    val favs = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList() }
+                    if (genAtStart != sessionGeneration) if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
+                    if (favs.isEmpty()) shelvesToFeedData(emptyList()) else {
+                        val modifiedTracks = applyTrackLayoutExtras(favs)
+                        val paged: PagedData<Shelf> = PagedData.Single { modifiedTracks.map { Shelf.Item(it) } }
+                        Feed.Data(
+                            pagedData = paged,
+                            buttons = Feed.Buttons(
+                                showSearch = true,
+                                showSort = true,
+                                showPlayAndShuffle = true,
+                                customTrackList = modifiedTracks
+                            )
+                        )
+                    }
+                }
+                else -> shelvesToFeedData(emptyList())
+            }
+        }
     }
 
     // --- LoginClient ---
@@ -533,7 +611,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 val coverTrack = tracksForCover.firstOrNull { it.cover != null }
                 if (coverTrack != null) p.copy(cover = coverTrack.cover) else p
             }
-        }.filterNotNull()
+        }
         if (gen != sessionGeneration) return null
         return enhanced
     }
@@ -552,85 +630,6 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 buttons = null,
                 background = null
             )
-        }
-    }
-
-    // --- LibraryFeedClient ---
-    /** Load user's library feed with tabs for different content types */
-    override suspend fun loadLibraryFeed(): Feed<Shelf> {
-        val user = getCurrentUser()
-        if (user == null || !api.hasValidSession()) throw ClientException.LoginRequired()
-        val genAtStart = sessionGeneration
-        return Feed(libraryTabs) { tab ->
-            // Re-check auth & generation every invocation
-            if (genAtStart != sessionGeneration) {
-                if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
-            }
-            if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
-            when (tab?.id) {
-                "all" -> {
-                    val playlists = try { loadPlaylists(genAtStart) } catch (e: ClientException.LoginRequired) { throw e } catch (_: Throwable) { null }
-                    val favorites = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList<Track>() }
-                    if (genAtStart != sessionGeneration) { if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired() }
-                    val shelves = buildList {
-                        if (!playlists.isNullOrEmpty()) add(
-                            Shelf.Lists.Items(
-                                id = "library_playlists_all",
-                                title = "Playlists",
-                                list = playlists,
-                                type = Shelf.Lists.Type.Linear
-                            )
-                        )
-                        if (favorites.isNotEmpty()) add(
-                            Shelf.Lists.Tracks(
-                                id = "favorites_tracks_all",
-                                title = "Favorites",
-                                list = favorites
-                            )
-                        )
-                    }
-                    shelvesToFeedData(shelves)
-                }
-                "playlists" -> {
-                    val playlists = try { loadPlaylists(genAtStart) } catch (e: ClientException.LoginRequired) { throw e } catch (_: Throwable) { null }
-                    if (genAtStart != sessionGeneration) { if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired() }
-                    val shelves = if (playlists.isNullOrEmpty()) emptyList() else listOf(
-                        Shelf.Lists.Items(
-                            id = "library_playlists_tab",
-                            title = "Playlists",
-                            list = playlists,
-                            type = Shelf.Lists.Type.Linear
-                        )
-                    )
-                    shelvesToFeedData(shelves)
-                }
-                "tracks" -> {
-                    val favs = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList<Track>() }
-                    if (genAtStart != sessionGeneration) { if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired() }
-                    if (favs.isEmpty()) {
-                        shelvesToFeedData(emptyList())
-                    } else {
-                        val layoutExtras = mapOf(
-                            "preferred_layout" to "grid_if_wide",
-                            "preferred_padding" to "16",
-                            "preferred_item_spacing" to "8"
-                        )
-                        val modifiedTracks = favs.map { it.copy(extras = it.extras + layoutExtras) }
-                        val paged: PagedData<Shelf> = PagedData.Single { modifiedTracks.map { Shelf.Item(it) } }
-                        Feed.Data(
-                            pagedData = paged,
-                            buttons = Feed.Buttons(
-                                showSearch = true,
-                                showSort = true,
-                                showPlayAndShuffle = true,
-                                customTrackList = modifiedTracks
-                            ),
-                            background = null
-                        )
-                    }
-                }
-                else -> shelvesToFeedData(emptyList())
-            }
         }
     }
 

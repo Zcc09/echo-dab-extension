@@ -21,17 +21,18 @@ class Converter {
 
     var api: DABApi? = null
 
-    private val json = Json { ignoreUnknownKeys = true; coerceInputValues = true }
+    // Lazy to avoid cost if converter used only for a subset
+    private val json by lazy { Json { ignoreUnknownKeys = true; coerceInputValues = true } }
 
     // Precompiled regexes for performance
     private companion object {
-        val LRC_LINE_REGEX = Regex("\\[(\\d+):(\\d{2})(?:[.:](\\d{1,3}))?](.*)")
-        val BRACKET_TIMESTAMP_REGEX = Regex("[\\[(]\\s*\\d{1,2}:\\d{2}(?:[.:]\\d{1,3})?\\s*[)\\]]")
-        val FULL_HMS_REGEX = Regex("\\b\\d{1,2}:\\d{2}:\\d{2}(?:[.:]\\d{1,3})?\\b")
-        val MMSS_REGEX = Regex("\\b\\d{1,2}:\\d{2}(?:[.:]\\d{1,3})?\\b")
-        val LEADING_SEPARATORS_REGEX = Regex("^[\\s-:]+|[\\s-:]+$")
-        val MULTI_SPACE_REGEX = Regex("[\\t ]+")
-        val MULTI_NEWLINE_REGEX = Regex("(?:\\n\\s*){2,}")
+        @JvmField val LRC_LINE_REGEX = Regex("\\[(\\d+):(\\d{2})(?:[.:](\\d{1,3}))?](.*)")
+        @JvmField val BRACKET_TIMESTAMP_REGEX = Regex("[\\[(]\\s*\\d{1,2}:\\d{2}(?:[.:]\\d{1,3})?\\s*[)\\]]")
+        @JvmField val FULL_HMS_REGEX = Regex("\\b\\d{1,2}:\\d{2}:\\d{2}(?:[.:]\\d{1,3})?\\b")
+        @JvmField val MMSS_REGEX = Regex("\\b\\d{1,2}:\\d{2}(?:[.:]\\d{1,3})?\\b")
+        @JvmField val LEADING_SEPARATORS_REGEX = Regex("^[\\s-:]+|[\\s-:]+$")
+        @JvmField val MULTI_SPACE_REGEX = Regex("[\\t ]+")
+        @JvmField val MULTI_NEWLINE_REGEX = Regex("(?:\\n\\s*){2,}")
     }
 
     /** Convert DAB user to Echo user model */
@@ -372,42 +373,35 @@ class Converter {
     /** Parse time string to milliseconds */
     private fun parseTimeToMillis(time: String): Long? {
         val trimmed = time.trim()
-        // Numeric seconds
-        val asDouble = trimmed.toDoubleOrNull()
-        if (asDouble != null) return (asDouble * 1000).toLong()
-
+        trimmed.toDoubleOrNull()?.let { return (it * 1000).toLong() }
         val parts = trimmed.split(':')
-        try {
-            if (parts.size == 3) {
-                val h = parts[0].toLong()
-                val m = parts[1].toLong()
-                val sParts = parts[2].split('.', ',')
-                val sec = sParts[0].toLong()
-                val ms = sParts.getOrNull(1)?.padEnd(3, '0')?.take(3)?.toLong() ?: 0L
-                return h * 3600_000 + m * 60_000 + sec * 1000 + ms
+        return try {
+            when (parts.size) {
+                3 -> {
+                    val h = parts[0].toLong(); val m = parts[1].toLong()
+                    val sParts = parts[2].split('.', ','); val sec = sParts[0].toLong()
+                    val ms = sParts.getOrNull(1)?.padEnd(3, '0')?.take(3)?.toLong() ?: 0L
+                    h * 3600_000 + m * 60_000 + sec * 1000 + ms
+                }
+                2 -> {
+                    val m = parts[0].toLong(); val sParts = parts[1].split('.', ',')
+                    val sec = sParts[0].toLong(); val ms = sParts.getOrNull(1)?.padEnd(3, '0')?.take(3)?.toLong() ?: 0L
+                    m * 60_000 + sec * 1000 + ms
+                }
+                else -> null
             }
-            if (parts.size == 2) {
-                val m = parts[0].toLong()
-                val sParts = parts[1].split('.', ',')
-                val sec = sParts[0].toLong()
-                val ms = sParts.getOrNull(1)?.padEnd(3, '0')?.take(3)?.toLong() ?: 0L
-                return m * 60_000 + sec * 1000 + ms
-            }
-        } catch (_: Exception) {}
-        return null
+        } catch (_: Throwable) { null }
     }
 
     /** Remove LRC timestamps from text */
     private fun stripLrcTimestamps(input: String): String {
         if (input.isBlank()) return ""
-
-        var s = input.replace(Regex("<[^>]+>"), " ")
-        s = s.replace(BRACKET_TIMESTAMP_REGEX, " ")
-        s = s.replace(FULL_HMS_REGEX, " ")
-        s = s.replace(MMSS_REGEX, " ")
-        s = s.lines().joinToString("\n") { line ->
-            line.replace(LEADING_SEPARATORS_REGEX, "").trim()
-        }
+        var s = input
+            .replace(Regex("<[^>]+>"), " ")
+            .replace(BRACKET_TIMESTAMP_REGEX, " ")
+            .replace(FULL_HMS_REGEX, " ")
+            .replace(MMSS_REGEX, " ")
+        s = s.lines().joinToString("\n") { line -> line.replace(LEADING_SEPARATORS_REGEX, "").trim() }
         s = s.replace(MULTI_SPACE_REGEX, " ")
         s = s.lines().joinToString("\n") { it.trim() }
         s = s.replace(MULTI_NEWLINE_REGEX, "\n")
