@@ -22,11 +22,8 @@ Additionally, AI assistance was utilized in the development of this extension so
 
 ## Planned Features
 
-
-- Get, add, and remove Tracks from Queue to allow synchronization between devices.
 - Optional Homefeed with Latest releases, Top charts, and user recommendations.
 - Account Creation from within the extension.
-- Customize Library Organization.
 - Download Support. 
 
 ## Acknowledgements
