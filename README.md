@@ -16,12 +16,12 @@ Additionally, AI assistance was utilized in the development of this extension so
 - Login to DAB Music with your account (No registration support yet).
 - Fetching user Libraries and Favorited Tracks.
 - Adding and removing Tracks from favorites.
-- Timed lyrics if available and simple lyrics if not. 
+- Timed lyrics if available and simple lyrics if not.
+- Creation and deletion of user Playlists.
+- Adding and removing Tracks from user Playlists.
 
 ## Planned Features
 
-- Creation and deletion of user Playlists.
-- Adding and removing Tracks from user Playlists.
 - Get, add, and remove Tracks from Queue to allow synchronization between devices.
 - Optional Homefeed with Latest releases, Top charts, and user recommendations.
 - Account Creation from within the extension.
