@@ -1,5 +1,6 @@
 package dev.brahmkshatriya.echo.extension
 
+import dev.brahmkshatriya.echo.extension.utils.ApiConstants
 import dev.brahmkshatriya.echo.common.clients.*
 import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.helpers.ClientException
@@ -13,7 +14,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 import okhttp3.OkHttpClient
-import java.net.URLEncoder
 
 @Suppress("unused", "UNUSED_PARAMETER")
 class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient, PlaylistClient,
@@ -22,7 +22,6 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     companion object {
         private const val PREVIEW_LIMIT = 20
         private const val FULL_LIMIT = 200
-        private const val PLAYLIST_TRACK_AGGREGATE_LIMIT = 5000
         private val STANDARD_LAYOUT_EXTRAS = mapOf(
             "preferred_layout" to "grid_if_wide",
             "preferred_padding" to "16",
@@ -104,28 +103,63 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
         val streamUrl = withContext(Dispatchers.IO) {
             try {
-                val cachedUrl = api.getCachedStreamUrl(candidate)
-                if (!cachedUrl.isNullOrBlank()) return@withContext cachedUrl
-
+                // If candidate already looks like a direct URL (and not the API /stream endpoint) use it directly
                 if (candidate.startsWith("http", ignoreCase = true) && !candidate.contains("/api/stream")) {
                     return@withContext candidate
                 }
-
+                // Try resolving via API
                 val resolved = api.getStreamUrl(candidate)
                 if (!resolved.isNullOrBlank()) return@withContext resolved
-
+                // Fallback construction
                 if (candidate.startsWith("http", ignoreCase = true)) candidate
-                else "https://dab.yeet.su/api/stream?trackId=${URLEncoder.encode(candidate, "UTF-8")}"
+                else ApiConstants.streamUrl(candidate)
             } catch (_: Throwable) {
                 if (candidate.startsWith("http", ignoreCase = true)) candidate
-                else "https://dab.yeet.su/api/stream?trackId=${URLEncoder.encode(candidate, "UTF-8")}"
+                else ApiConstants.streamUrl(candidate)
             }
         }
 
         return streamUrl.toServerMedia()
     }
 
-    override suspend fun loadFeed(track: Track): Feed<Shelf>? = null
+    override suspend fun loadFeed(track: Track): Feed<Shelf>? {
+        return try {
+            val dabAlbum = withContext(Dispatchers.IO) {
+                val albumId = track.album?.id
+                if (!albumId.isNullOrBlank()) runCatching { api.getAlbum(albumId) }.getOrNull() else null
+            }
+            val albumModel: Album? = dabAlbum?.let { converter.toAlbum(it) } ?: track.album
+            val albumTracks: List<Track> = dabAlbum?.tracks
+                ?.mapNotNull { runCatching { converter.toTrack(it) }.getOrNull() }
+                ?.let { applyTrackLayoutExtras(it) }
+                ?: emptyList()
+
+            // Merge track artists + album artists, keep order: track.artists first, then album unique
+            val mergedArtists = buildList {
+                track.artists.forEach { if (it.name.isNotBlank()) add(it) }
+                albumModel?.artists?.forEach { albArt ->
+                    if (albArt.name.isNotBlank() && track.artists.none { it.id == albArt.id || it.name == albArt.name }) add(albArt)
+                }
+            }
+
+            val shelves = mutableListOf<Shelf>()
+
+            if (albumTracks.isNotEmpty()) {
+                shelves.add(
+                    Shelf.Lists.Tracks(
+                        id = "track_info_album_tracks_${albumModel?.id ?: track.id}",
+                        title = albumModel?.let { "Tracks on ${it.title}" } ?: "Tracks",
+                        list = albumTracks,
+                        type = Shelf.Lists.Type.Linear
+                    )
+                )
+            }
+
+            if (shelves.isEmpty()) null else shelves.toFeed()
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     // --- LyricsClient ---
     override suspend fun loadLyrics(lyrics: Lyrics): Lyrics = lyrics
@@ -154,58 +188,35 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
     // --- PlaylistClient ---
     override suspend fun loadPlaylist(playlist: Playlist): Playlist {
-        requireAuth()
-        return playlist
+        requireAuth(); return playlist
     }
 
     /** Load all tracks for a playlist */
     override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
         requireAuth()
-        try {
+        return try {
             val tracks: PagedData<Track> = api.getPlaylistTracks(playlist, 1000)
             val trackList = tracks.loadAll()
             if (trackList.isEmpty()) {
-                val directTracks = try {
-                    withContext(Dispatchers.IO) {
-                        api.fetchAllPlaylistTracks(playlist, 1000)
-                    }
-                } catch (_: Throwable) {
-                    emptyList()
-                }
-                return directTracks.toFeed()
-            }
-            return tracks.toFeed()
-        } catch (_: Throwable) {
-            return emptyList<Track>().toFeed()
-        }
+                val direct = try { withContext(Dispatchers.IO) { api.fetchAllPlaylistTracks(playlist, 1000) } } catch (_: Throwable) { emptyList() }
+                direct.toFeed()
+            } else tracks.toFeed()
+        } catch (_: Throwable) { emptyList<Track>().toFeed() }
     }
 
     /** Load playlist feed with tracks shelf */
     override suspend fun loadFeed(playlist: Playlist): Feed<Shelf>? {
         requireAuth()
-        try {
-            val tracksList = try {
-                withContext(Dispatchers.IO) {
-                    api.fetchAllPlaylistTracks(playlist, 1000)
-                }
-            } catch (_: Throwable) {
-                emptyList<Track>()
-            }
-
-            val shelves = mutableListOf<Shelf>()
-            if (tracksList.isNotEmpty()) {
-                shelves.add(
-                    Shelf.Lists.Tracks(
-                        id = "playlist_tracks_${playlist.id}",
-                        title = "Tracks",
-                        list = tracksList
-                    )
+        return try {
+            val list = try { withContext(Dispatchers.IO) { api.fetchAllPlaylistTracks(playlist, 1000) } } catch (_: Throwable) { emptyList() }
+            if (list.isEmpty()) null else listOf(
+                Shelf.Lists.Tracks(
+                    id = "playlist_tracks_${playlist.id}",
+                    title = "Tracks",
+                    list = list
                 )
-            }
-            return if (shelves.isNotEmpty()) shelves.toFeed() else null
-        } catch (_: Throwable) {
-            return null
-        }
+            ).toFeed()
+        } catch (_: Throwable) { null }
     }
 
     // --- AlbumClient ---
@@ -252,86 +263,15 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         ).toFeed()
     }
 
-    // Region: Common Helpers -------------------------------------------------
-
+    // Helpers -------------------------------------------------
     private fun applyTrackLayoutExtras(tracks: List<Track>) =
         tracks.map { it.copy(extras = it.extras + STANDARD_LAYOUT_EXTRAS) }
-
     private fun applyAlbumLayoutExtras(albums: List<Album>) =
         albums.map { it.copy(extras = it.extras + STANDARD_LAYOUT_EXTRAS) }
-
     private fun applyArtistLayoutExtras(artists: List<Artist>) =
         artists.map { it.copy(extras = it.extras + STANDARD_LAYOUT_EXTRAS) }
 
-    private fun buildPagedShelf(vararg shelves: Shelf): PagedData<Shelf> =
-        PagedData.Single { shelves.toList() }
-
-    private fun buildTrackMoreFeed(all: List<Track>): Feed<Shelf> = Feed(listOf()) {
-        val modified = applyTrackLayoutExtras(all)
-        val paged: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
-        Feed.Data(
-            pagedData = paged,
-            buttons = Feed.Buttons(
-                showSearch = true,
-                showSort = true,
-                showPlayAndShuffle = true,
-                customTrackList = modified
-            )
-        )
-    }
-
-    private fun buildAlbumMoreFeed(all: List<Album>): Feed<Shelf> = Feed(listOf()) {
-        val modified = applyAlbumLayoutExtras(all)
-        val paged: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
-        Feed.Data(
-            pagedData = paged,
-            buttons = Feed.Buttons(
-                showSearch = true,
-                showSort = true,
-                showPlayAndShuffle = false
-            )
-        )
-    }
-
-    private fun buildArtistMoreFeed(all: List<Artist>): Feed<Shelf> = Feed(listOf()) {
-        val modified = applyArtistLayoutExtras(all)
-        val paged: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
-        Feed.Data(
-            pagedData = paged,
-            buttons = Feed.Buttons(
-                showSearch = true,
-                showSort = true,
-                showPlayAndShuffle = false
-            )
-        )
-    }
-
-    private fun buildPlaylistMoreFeed(allPlaylists: List<Playlist>, aggregatedTracks: List<Track>): Feed<Shelf> = Feed(listOf()) {
-        val paged: PagedData<Shelf> = buildPagedShelf(
-            Shelf.Lists.Items(
-                id = "library_playlists_all_full",
-                title = "Playlists",
-                list = allPlaylists,
-                type = Shelf.Lists.Type.Linear
-            )
-        )
-        Feed.Data(
-            pagedData = paged,
-            buttons = Feed.Buttons(
-                showSearch = true,
-                showSort = true,
-                showPlayAndShuffle = aggregatedTracks.isNotEmpty(),
-                customTrackList = aggregatedTracks.ifEmpty { null }
-            )
-        )
-    }
-
-    private fun buildFavoritesMoreFeed(allTracks: List<Track>): Feed<Shelf> = buildTrackMoreFeed(allTracks)
-
-    private fun moreFeedIfNeeded(count: Int, builder: () -> Feed<Shelf>): Feed<Shelf>? =
-        if (count >= PREVIEW_LIMIT) builder() else null
-
-    // Region: Search Feed ----------------------------------------------------
+    // Search Feed ---------------------------------------------
     /** Load search feed with tabs for different content types */
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
         if (query.isBlank()) return emptyList<Shelf>().toFeed()
@@ -345,39 +285,33 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                             if (artistsFull.isEmpty()) artistsFull = try { withContext(Dispatchers.IO) { api.searchArtists(query, FULL_LIMIT) } } catch (_: Throwable) { emptyList() }
 
                             val shelves = mutableListOf<Shelf>()
-                            if (tracksFull.isNotEmpty()) {
-                                shelves.add(
-                                    Shelf.Lists.Items(
-                                        id = "search_all_tracks",
-                                        title = "Tracks",
-                                        list = tracksFull.take(PREVIEW_LIMIT),
-                                        type = Shelf.Lists.Type.Linear,
-                                        more = moreFeedIfNeeded(tracksFull.size) { buildTrackMoreFeed(tracksFull) }
-                                    )
+                            if (tracksFull.isNotEmpty()) shelves.add(
+                                Shelf.Lists.Items(
+                                    id = "search_all_tracks",
+                                    title = "Tracks",
+                                    list = tracksFull.take(PREVIEW_LIMIT),
+                                    type = Shelf.Lists.Type.Linear,
+                                    more = if (tracksFull.size >= PREVIEW_LIMIT) buildTrackMoreFeed(tracksFull) else null
                                 )
-                            }
-                            if (albumsFull.isNotEmpty()) {
-                                shelves.add(
-                                    Shelf.Lists.Items(
-                                        id = "search_all_albums",
-                                        title = "Albums",
-                                        list = albumsFull.take(PREVIEW_LIMIT),
-                                        type = Shelf.Lists.Type.Linear,
-                                        more = moreFeedIfNeeded(albumsFull.size) { buildAlbumMoreFeed(albumsFull) }
-                                    )
+                            )
+                            if (albumsFull.isNotEmpty()) shelves.add(
+                                Shelf.Lists.Items(
+                                    id = "search_all_albums",
+                                    title = "Albums",
+                                    list = albumsFull.take(PREVIEW_LIMIT),
+                                    type = Shelf.Lists.Type.Linear,
+                                    more = if (albumsFull.size >= PREVIEW_LIMIT) buildAlbumMoreFeed(albumsFull) else null
                                 )
-                            }
-                            if (artistsFull.isNotEmpty()) {
-                                shelves.add(
-                                    Shelf.Lists.Items(
-                                        id = "search_all_artists",
-                                        title = "Artists",
-                                        list = artistsFull.take(PREVIEW_LIMIT),
-                                        type = Shelf.Lists.Type.Linear,
-                                        more = moreFeedIfNeeded(artistsFull.size) { buildArtistMoreFeed(artistsFull) }
-                                    )
+                            )
+                            if (artistsFull.isNotEmpty()) shelves.add(
+                                Shelf.Lists.Items(
+                                    id = "search_all_artists",
+                                    title = "Artists",
+                                    list = artistsFull.take(PREVIEW_LIMIT),
+                                    type = Shelf.Lists.Type.Linear,
+                                    more = if (artistsFull.size >= PREVIEW_LIMIT) buildArtistMoreFeed(artistsFull) else null
                                 )
-                            }
+                            )
                             shelves
                         } catch (_: Throwable) { emptyList() }
                     }
@@ -386,46 +320,43 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 "tracks" -> {
                     val fullTracks = try { withContext(Dispatchers.IO) { api.searchTracks(query, FULL_LIMIT) } } catch (_: Throwable) { emptyList() }
                     if (fullTracks.isEmpty()) Feed.Data(PagedData.empty()) else {
-                        val modifiedFull = applyTrackLayoutExtras(fullTracks)
-                        val moreFeed = moreFeedIfNeeded(modifiedFull.size) { buildTrackMoreFeed(modifiedFull) }
-                        val previewShelf = Shelf.Lists.Items(
+                        val modified = applyTrackLayoutExtras(fullTracks)
+                        val preview = Shelf.Lists.Items(
                             id = "search_tracks_preview",
                             title = "Results",
-                            list = modifiedFull.take(PREVIEW_LIMIT),
+                            list = modified.take(PREVIEW_LIMIT),
                             type = Shelf.Lists.Type.Linear,
-                            more = moreFeed
+                            more = if (modified.size >= PREVIEW_LIMIT) buildTrackMoreFeed(modified) else null
                         )
-                        Feed.Data(buildPagedShelf(previewShelf))
+                        Feed.Data(PagedData.Single { listOf(preview) })
                     }
                 }
                 "albums" -> {
                     val fullAlbums = try { withContext(Dispatchers.IO) { api.searchAlbums(query, FULL_LIMIT) } } catch (_: Throwable) { emptyList() }
                     if (fullAlbums.isEmpty()) Feed.Data(PagedData.empty()) else {
-                        val modifiedFull = applyAlbumLayoutExtras(fullAlbums)
-                        val moreFeed = moreFeedIfNeeded(modifiedFull.size) { buildAlbumMoreFeed(modifiedFull) }
-                        val previewShelf = Shelf.Lists.Items(
+                        val modified = applyAlbumLayoutExtras(fullAlbums)
+                        val preview = Shelf.Lists.Items(
                             id = "search_albums_preview",
                             title = "Albums",
-                            list = modifiedFull.take(PREVIEW_LIMIT),
+                            list = modified.take(PREVIEW_LIMIT),
                             type = Shelf.Lists.Type.Linear,
-                            more = moreFeed
+                            more = if (modified.size >= PREVIEW_LIMIT) buildAlbumMoreFeed(modified) else null
                         )
-                        Feed.Data(buildPagedShelf(previewShelf))
+                        Feed.Data(PagedData.Single { listOf(preview) })
                     }
                 }
                 "artists" -> {
                     val fullArtists = try { withContext(Dispatchers.IO) { api.searchArtists(query, FULL_LIMIT) } } catch (_: Throwable) { emptyList() }
                     if (fullArtists.isEmpty()) Feed.Data(PagedData.empty()) else {
-                        val modifiedFull = applyArtistLayoutExtras(fullArtists)
-                        val moreFeed = moreFeedIfNeeded(modifiedFull.size) { buildArtistMoreFeed(modifiedFull) }
-                        val previewShelf = Shelf.Lists.Items(
+                        val modified = applyArtistLayoutExtras(fullArtists)
+                        val preview = Shelf.Lists.Items(
                             id = "search_artists_preview",
                             title = "Artists",
-                            list = modifiedFull.take(PREVIEW_LIMIT),
+                            list = modified.take(PREVIEW_LIMIT),
                             type = Shelf.Lists.Type.Grid,
-                            more = moreFeed
+                            more = if (modified.size >= PREVIEW_LIMIT) buildArtistMoreFeed(modified) else null
                         )
-                        Feed.Data(buildPagedShelf(previewShelf))
+                        Feed.Data(PagedData.Single { listOf(preview) })
                     }
                 }
                 else -> emptyList<Shelf>().toFeedData()
@@ -433,53 +364,48 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         }
     }
 
-    // Region: Library Feed ---------------------------------------------------
+    // Library Feed -------------------------------------------
     /** Load user's library feed with tabs for different content types */
     override suspend fun loadLibraryFeed(): Feed<Shelf> {
-        getCurrentUser() ?: throw ClientException.LoginRequired()
+        // If not logged in, raise login required so host can prompt login (no shelves rendered)
+        val loggedIn = try { getCurrentUser() != null && api.hasValidSession() } catch (_: Throwable) { false }
+        if (!loggedIn) throw ClientException.LoginRequired()
+
         val genAtStart = sessionGeneration
         return Feed(libraryTabs) { tab ->
-            if (genAtStart != sessionGeneration) if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
-            if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
+            // Strong auth guard each invocation
+            if (!api.hasValidSession() || getCurrentUser() == null) throw ClientException.LoginRequired()
+            if (genAtStart != sessionGeneration) if (!api.hasValidSession() || getCurrentUser() == null) throw ClientException.LoginRequired()
             when (tab?.id) {
                 "all" -> {
                     val playlists = try { loadPlaylists(genAtStart) } catch (e: ClientException.LoginRequired) { throw e } catch (_: Throwable) { null }
                     val favorites = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList() }
-                    if (genAtStart != sessionGeneration) if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
                     val shelves = buildList {
                         playlists?.takeIf { it.isNotEmpty() }?.let { pls ->
-                            val moreFeed = moreFeedIfNeeded(pls.size) {
-                                // Defer expensive aggregation; placeholder empty list for play/shuffle
-                                buildPlaylistMoreFeed(pls, emptyList())
-                            }
                             add(
                                 Shelf.Lists.Items(
                                     id = "library_playlists_all",
                                     title = "Playlists",
                                     list = pls.take(PREVIEW_LIMIT),
                                     type = Shelf.Lists.Type.Linear,
-                                    more = moreFeed
+                                    more = if (pls.size >= PREVIEW_LIMIT) buildPlaylistMoreFeed(pls, emptyList()) else null
                                 )
                             )
                         }
-                        if (favorites.isNotEmpty()) {
-                            val moreFeed = moreFeedIfNeeded(favorites.size) { buildFavoritesMoreFeed(favorites) }
-                            add(
-                                Shelf.Lists.Tracks(
-                                    id = "favorites_tracks_all",
-                                    title = "Favorites",
-                                    list = favorites.take(PREVIEW_LIMIT),
-                                    type = Shelf.Lists.Type.Linear,
-                                    more = moreFeed
-                                )
+                        if (favorites.isNotEmpty()) add(
+                            Shelf.Lists.Tracks(
+                                id = "favorites_tracks_all",
+                                title = "Favorites",
+                                list = favorites.take(PREVIEW_LIMIT),
+                                type = Shelf.Lists.Type.Linear,
+                                more = if (favorites.size >= PREVIEW_LIMIT) buildFavoritesMoreFeed(favorites) else null
                             )
-                        }
+                        )
                     }
                     shelvesToFeedData(shelves)
                 }
                 "playlists" -> {
                     val playlists = try { loadPlaylists(genAtStart) } catch (e: ClientException.LoginRequired) { throw e } catch (_: Throwable) { null }
-                    if (genAtStart != sessionGeneration) if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
                     val shelfList = playlists?.takeIf { it.isNotEmpty() }?.let {
                         listOf(
                             Shelf.Lists.Items(
@@ -494,7 +420,6 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
                 }
                 "tracks" -> {
                     val favs = try { withContext(Dispatchers.IO) { api.getFavoritesAuthenticated() } } catch (_: Throwable) { emptyList() }
-                    if (genAtStart != sessionGeneration) if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
                     if (favs.isEmpty()) shelvesToFeedData(emptyList()) else {
                         val modifiedTracks = applyTrackLayoutExtras(favs)
                         val paged: PagedData<Shelf> = PagedData.Single { modifiedTracks.map { Shelf.Item(it) } }
@@ -514,7 +439,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         }
     }
 
-    // --- LoginClient ---
+    // Auth / User --------------------------------------------
     override val forms: List<LoginClient.Form>
         get() = listOf(
             LoginClient.Form(
@@ -543,9 +468,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         val email = data["email"] ?: error("Email is required")
         val password = data["password"] ?: error("Password is required")
         val user = withContext(Dispatchers.IO) { api.loginAndSaveCookie(email, password) }
-        currentUser = user
-        bumpSessionGeneration() // invalidate any in-flight feed tasks from previous session
-        return listOf(user)
+        currentUser = user; bumpSessionGeneration(); return listOf(user)
     }
 
     /** Set or clear current user */
@@ -565,33 +488,21 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
     /** Get current authenticated user */
     override suspend fun getCurrentUser(): User? {
-        if (currentUser != null && api.hasValidSession()) {
-            return currentUser
-        }
-
+        // Clear stale cached user if session expired/invalid
+        if (currentUser != null && !api.hasValidSession()) currentUser = null
+        if (currentUser != null && api.hasValidSession()) return currentUser
         val sessionCookie = settings.getString("session_cookie")
         if (!sessionCookie.isNullOrBlank()) {
             currentUser = withContext(Dispatchers.IO) {
-                runCatching {
-                    if (api.hasValidSession()) {
-                        api.getMe()
-                    } else {
-                        null
-                    }
-                }.getOrNull()
+                runCatching { if (api.hasValidSession()) api.getMe() else null }.getOrNull()
             }
-            if (currentUser == null) {
-                settings.putString("session_cookie", null)
-            }
+            if (currentUser == null) settings.putString("session_cookie", null)
         }
-
         return currentUser
     }
 
     // Added helper to centralize auth requirement
-    private suspend fun requireAuth() {
-        if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
-    }
+    private suspend fun requireAuth() { if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired() }
 
     /** Load playlists list (no shelves) */
     private suspend fun loadPlaylists(gen: Long = sessionGeneration): List<Playlist>? {
@@ -604,9 +515,7 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         val enhanced = base.map { p ->
             if (gen != sessionGeneration) return null
             if (p.cover != null) p else {
-                val tracksForCover = try {
-                    withContext(Dispatchers.IO) { api.fetchAllPlaylistTracks(p, 5) }
-                } catch (_: Throwable) { emptyList() }
+                val tracksForCover = try { withContext(Dispatchers.IO) { api.fetchAllPlaylistTracks(p, 5) } } catch (_: Throwable) { emptyList() }
                 if (gen != sessionGeneration) return null
                 val coverTrack = tracksForCover.firstOrNull { it.cover != null }
                 if (coverTrack != null) p.copy(cover = coverTrack.cover) else p
@@ -617,49 +526,21 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
     }
 
     // --- Helper to build Feed.Data from shelves with proper empty handling
-    private fun shelvesToFeedData(shelves: List<Shelf>): Feed.Data<Shelf> {
-        return if (shelves.isEmpty()) {
-            Feed.Data(
-                pagedData = PagedData.empty(),
-                buttons = Feed.Buttons.EMPTY,
-                background = null
-            )
-        } else {
-            Feed.Data(
-                pagedData = PagedData.Single { shelves },
-                buttons = null,
-                background = null
-            )
-        }
-    }
+    private fun shelvesToFeedData(shelves: List<Shelf>): Feed.Data<Shelf> =
+        if (shelves.isEmpty()) Feed.Data(PagedData.empty(), Feed.Buttons.EMPTY, null) else
+            Feed.Data(PagedData.Single { shelves }, null, null)
 
     // --- LikeClient ---
     /** Add or remove track from favorites */
     override suspend fun likeItem(item: EchoMediaItem, shouldLike: Boolean) {
-        requireAuth()
-        val track = when (item) {
-            is Track -> item
-            else -> return
-        }
-        withContext(Dispatchers.IO) {
-            if (shouldLike) {
-                api.addFavorite(track)
-            } else {
-                api.removeFavorite(track.id)
-            }
-        }
+        requireAuth(); val track = item as? Track ?: return
+        withContext(Dispatchers.IO) { if (shouldLike) api.addFavorite(track) else api.removeFavorite(track.id) }
     }
 
     /** Check if track is liked/favorited */
     override suspend fun isItemLiked(item: EchoMediaItem): Boolean {
-        requireAuth()
-        val track = when (item) {
-            is Track -> item
-            else -> return false
-        }
-        return withContext(Dispatchers.IO) {
-            api.isTrackFavorite(track.id)
-        }
+        requireAuth(); val track = item as? Track ?: return false
+        return withContext(Dispatchers.IO) { api.isTrackFavorite(track.id) }
     }
 
     // --- PlaylistEditClient ---
@@ -669,7 +550,6 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         val trackId = track?.id
         return playlists.filter { it.isEditable }.map { p ->
             if (trackId == null) p to false else {
-                // Load tracks only if needed to check membership; use cached paged fetch
                 val contains = try {
                     val list = withContext(Dispatchers.IO) { api.fetchAllPlaylistTracks(p, 1000) }
                     list.any { it.id == trackId }
@@ -699,7 +579,6 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
         playlist: Playlist, tracks: List<Track>, index: Int, new: List<Track>
     ) {
         if (getCurrentUser() == null || !api.hasValidSession()) throw ClientException.LoginRequired()
-        // API doesn't support ordering by index; just append
         withContext(Dispatchers.IO) { api.addTracksToPlaylist(playlist, new) }
     }
 
@@ -712,7 +591,52 @@ class DABExtension : ExtensionClient, LoginClient.CustomInput, LibraryFeedClient
 
     override suspend fun moveTrackInPlaylist(
         playlist: Playlist, tracks: List<Track>, fromIndex: Int, toIndex: Int
-    ) {
+    ) { }
 
+    // More feed helpers ---------------------------------------
+    private fun buildTrackMoreFeed(all: List<Track>): Feed<Shelf> = Feed(listOf()) {
+        val modified = applyTrackLayoutExtras(all)
+        val paged: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
+        Feed.Data(
+            pagedData = paged,
+            buttons = Feed.Buttons(
+                showSearch = true,
+                showSort = true,
+                showPlayAndShuffle = true,
+                customTrackList = modified
+            )
+        )
     }
+    private fun buildAlbumMoreFeed(all: List<Album>): Feed<Shelf> = Feed(listOf()) {
+        val modified = applyAlbumLayoutExtras(all)
+        val paged: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
+        Feed.Data(paged)
+    }
+    private fun buildArtistMoreFeed(all: List<Artist>): Feed<Shelf> = Feed(listOf()) {
+        val modified = applyArtistLayoutExtras(all)
+        val paged: PagedData<Shelf> = PagedData.Single { modified.map { Shelf.Item(it) } }
+        Feed.Data(paged)
+    }
+    private fun buildPlaylistMoreFeed(allPlaylists: List<Playlist>, aggregatedTracks: List<Track>): Feed<Shelf> = Feed(listOf()) {
+        val paged: PagedData<Shelf> = PagedData.Single {
+            listOf(
+                Shelf.Lists.Items(
+                    id = "library_playlists_all_full",
+                    title = "Playlists",
+                    list = allPlaylists,
+                    type = Shelf.Lists.Type.Linear
+                )
+            )
+        }
+        Feed.Data(
+            pagedData = paged,
+            buttons = Feed.Buttons(
+                showSearch = true,
+                showSort = true,
+                showPlayAndShuffle = aggregatedTracks.isNotEmpty(),
+                customTrackList = aggregatedTracks.ifEmpty { null }
+            )
+        )
+    }
+    private fun buildFavoritesMoreFeed(allTracks: List<Track>): Feed<Shelf> = buildTrackMoreFeed(allTracks)
 }

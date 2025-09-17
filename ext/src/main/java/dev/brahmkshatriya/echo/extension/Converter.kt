@@ -11,6 +11,7 @@ import dev.brahmkshatriya.echo.common.models.Lyrics
 import dev.brahmkshatriya.echo.extension.models.DabPlaylist
 import dev.brahmkshatriya.echo.extension.models.DabTrack
 import dev.brahmkshatriya.echo.extension.models.DabUser
+import dev.brahmkshatriya.echo.extension.utils.ApiConstants
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -57,7 +58,7 @@ class Converter {
 
     /** Convert DAB track to Echo track model */
     fun toTrack(track: DabTrack): Track {
-        val streamUrl = "https://dab.yeet.su/api/stream?trackId=${track.id}"
+        val streamUrl = ApiConstants.streamUrl(track.id.toString())
 
         // Determine audio quality metrics
         val (quality, qualityDescription) = run {

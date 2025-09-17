@@ -7,6 +7,7 @@ import dev.brahmkshatriya.echo.common.settings.Settings
 import dev.brahmkshatriya.echo.extension.Converter
 import dev.brahmkshatriya.echo.extension.utils.RequestUtils
 import dev.brahmkshatriya.echo.extension.utils.JsonParsingUtils
+import dev.brahmkshatriya.echo.extension.utils.ApiConstants
 
 class FavoritesService(
     private val httpClient: OkHttpClient,
@@ -15,71 +16,42 @@ class FavoritesService(
     private val converter: Converter
 ) {
     companion object {
-        private const val FAVORITES_ENDPOINT = "https://dab.yeet.su/api/favorites"
-        private const val CACHE_TTL_MS = 60_000L
+        private const val FAVORITES_PATH = "favorites"
     }
 
-    // Use consolidated utilities
     private val requestUtils: RequestUtils by lazy { RequestUtils(settings) }
-    private val jsonParsingUtils: JsonParsingUtils by lazy { JsonParsingUtils(json, converter) }
+            private val jsonParsingUtils: JsonParsingUtils by lazy { JsonParsingUtils(json, converter) }
 
-    // Cache full favorites list because server endpoint currently returns all favorites regardless of limit/offset
-    private var favoritesCache: Pair<Long, List<Track>>? = null
-
-    private fun invalidateInternal() { favoritesCache = null }
-    fun invalidateCache() = invalidateInternal()
-
-    private fun loadAllFavorites(): List<Track> {
-        if (!requestUtils.isLoggedIn()) { // not logged in
-            invalidateInternal(); return emptyList()
-        }
-        val now = System.currentTimeMillis()
-        favoritesCache?.let { (ts, list) ->
-            if (now - ts < CACHE_TTL_MS) return list
-        }
-        val list = fetchFavoritesFromUrl(FAVORITES_ENDPOINT, authenticated = true)
-        favoritesCache = now to list
-        return list
-    }
-
-    /** Fetch favorites from DAB API endpoint */
-    private fun fetchFavoritesFromUrl(@Suppress("UNUSED_PARAMETER") url: String, @Suppress("UNUSED_PARAMETER") authenticated: Boolean = true): List<Track> {
-        if (authenticated && !requestUtils.isLoggedIn()) return emptyList()
+    /** Always fetch the full favorites list fresh from server */
+    private fun fetchFavorites(): List<Track> {
+        if (!requestUtils.isLoggedIn()) return emptyList()
         return try {
-            val req = requestUtils.newRequestBuilder(url, authenticated).build()
+            val url = ApiConstants.api(FAVORITES_PATH)
+            val req = requestUtils.newRequestBuilder(url).build()
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
                     requestUtils.clearSessionOnAuthFailure(resp.code)
                     return emptyList()
                 }
                 val body = resp.body?.string() ?: return emptyList()
-                parseTracksFromJson(body)
+                // Parse with consolidated util (supports keys: favorites, tracks, etc.)
+                val root = runCatching { json.parseToJsonElement(body) }.getOrNull()
+                if (root != null) {
+                    val parsed = jsonParsingUtils.parseTracksFromResponse(root)
+                    if (parsed.isNotEmpty()) return parsed
+                }
+                // Fallback to DabTrackResponse structure
+                runCatching {
+                    val trackResponse: dev.brahmkshatriya.echo.extension.models.DabTrackResponse = json.decodeFromString(body)
+                    trackResponse.tracks.map { converter.toTrack(it) }
+                }.getOrElse { emptyList() }
             }
         } catch (_: Throwable) { emptyList() }
     }
 
-    /** Parse tracks from JSON response using consolidated utilities */
-    private fun parseTracksFromJson(body: String): List<Track> {
-        runCatching {
-            val root = json.parseToJsonElement(body)
-            val parsed = jsonParsingUtils.parseTracksFromResponse(root)
-            if (parsed.isNotEmpty()) return parsed
-        }
-        return runCatching {
-            val trackResponse: dev.brahmkshatriya.echo.extension.models.DabTrackResponse = json.decodeFromString(body)
-            trackResponse.tracks.map { converter.toTrack(it) }
-        }.getOrElse { emptyList() }
-    }
-
-    /** Public accessors (limit/offset ignored by API) */
-    @Suppress("unused")
     fun getFavorites(limit: Int = 200, offset: Int = 0): List<Track> {
-        val all = loadAllFavorites()
+        val all = fetchFavorites()
         if (offset >= all.size) return emptyList()
-        val slice = if (limit <= 0) all.drop(offset) else all.drop(offset).take(limit)
-        return slice
+        return if (limit <= 0) all.drop(offset) else all.drop(offset).take(limit)
     }
-
-    @Suppress("unused")
-    fun getFavoritesAuthenticated(limit: Int = 200, offset: Int = 0): List<Track> = getFavorites(limit, offset)
 }
